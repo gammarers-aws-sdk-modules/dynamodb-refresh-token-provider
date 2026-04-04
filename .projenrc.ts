@@ -1,13 +1,18 @@
 import { javascript, typescript, github } from 'projen';
 const project = new typescript.TypeScriptProject({
   defaultReleaseBranch: 'main',
-  name: 'workspace',
+  name: 'dynamodb-refresh-token-provider',
   packageManager: javascript.NodePackageManager.YARN_CLASSIC,
   projenrcTs: true,
   authorName: 'yicr',
   authorEmail: 'yicr@users.noreply.github.com',
   typescriptVersion: '5.9.x',
   repository: 'https://github.com/gammarers-aws-sdk-extensions/athena-query-result-collector.git',
+  deps: [
+    '@aws-sdk/client-dynamodb@^3.777.0',
+    '@aws-sdk/lib-dynamodb@^3.777.0',
+    '@aws-sdk/util-dynamodb@^3.777.0',
+  ],
   releaseToNpm: false,
   // npmTrustedPublishing: true,
   npmAccess: javascript.NpmAccess.PUBLIC,

@@ -1,5 +1,5 @@
 {
-  "name": "workspace",
+  "name": "dynamodb-refresh-token-provider",
   "repository": {
     "type": "git",
     "url": "https://github.com/gammarers-aws-sdk-extensions/athena-query-result-collector.git"
@@ -46,6 +46,11 @@
     "ts-jest": "^29.4.9",
     "ts-node": "^10.9.2",
     "typescript": "5.9.x"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.777.0",
+    "@aws-sdk/lib-dynamodb": "^3.777.0",
+    "@aws-sdk/util-dynamodb": "^3.777.0"
   },
   "engines": {
     "node": ">= 20.0.0"
