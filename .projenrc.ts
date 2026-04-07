@@ -14,7 +14,7 @@ const project = new typescript.TypeScriptProject({
     '@aws-sdk/lib-dynamodb@^3.777.0',
     '@aws-sdk/util-dynamodb@^3.777.0',
   ],
-  releaseToNpm: false,
+  releaseToNpm: true,
   // npmTrustedPublishing: true,
   npmAccess: javascript.NpmAccess.PUBLIC,
   minNodeVersion: '20.0.0',
