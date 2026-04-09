@@ -9,7 +9,7 @@ TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** 
 ## Features
 
 - **`RefreshTokenStore` interface** — swap implementations while keeping the same API.
-- **`DynamoRefreshTokenStore`** — single-table design with partition key `pk` (string), strongly consistent reads by default.
+- **`DynamodbRefreshTokenProvider`** — single-table design with partition key `pk` (string), strongly consistent reads by default.
 - **Rotation safety** — marks the old row as rotated and inserts the successor in one DynamoDB transaction; detects reuse and conflicting updates.
 - **Structured errors** — `RefreshTokenInvalidError`, `RefreshTokenExpiredError`, `RefreshTokenRevokedError`, `RefreshTokenReusedError`, and related types for `instanceof` handling.
 - **Utilities** — `sha256hex` and `randomtoken` for hashing and token generation aligned with the store.
@@ -30,12 +30,12 @@ Create a store with your table name, AWS region, and optional `StoreOptions`. En
 
 ```typescript
 import {
-  DynamoRefreshTokenStore,
+  DynamodbRefreshTokenProvider,
   RefreshTokenInvalidError,
   RefreshTokenReusedError,
 } from 'dynamodb-refresh-token-provider';
 
-const store = new DynamoRefreshTokenStore('your-refresh-token-table', 'us-east-1', {
+const store = new DynamodbRefreshTokenProvider('your-refresh-token-table', 'us-east-1', {
   ttlDays: 60,
   pkPrefix: 'rt#',
 });
@@ -68,7 +68,7 @@ await store.revoke({ refreshToken: issued.refreshToken });
 
 ## Options
 
-Constructor: `new DynamoRefreshTokenStore(tableName, region, options?)`.
+Constructor: `new DynamodbRefreshTokenProvider(tableName, region, options?)`.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
