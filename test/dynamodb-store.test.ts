@@ -7,7 +7,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 
 import {
-  DynamoRefreshTokenStore,
+  DynamodbRefreshTokenProvider,
   RefreshTokenExpiredError,
   RefreshTokenInvalidError,
   RefreshTokenReusedError,
@@ -35,7 +35,7 @@ const nowSec = Math.floor(fixedNow.getTime() / 1000);
 const defaultTtlSec = 60 * 24 * 60 * 60;
 const futureExpiresAt = nowSec + defaultTtlSec + 1;
 
-describe('DynamoRefreshTokenStore', () => {
+describe('DynamodbRefreshTokenProvider', () => {
   beforeEach(() => {
     mockSend.mockReset();
     (DynamoDBDocumentClient.from as jest.Mock).mockClear();
@@ -45,7 +45,7 @@ describe('DynamoRefreshTokenStore', () => {
     it('should put item with expected keys and return token metadata', async () => {
       mockSend.mockResolvedValueOnce({});
 
-      const store = new DynamoRefreshTokenStore('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       const result = await store.issue({
         subjectId: 'sub-1',
         sessionId: 'sess-1',
@@ -71,7 +71,7 @@ describe('DynamoRefreshTokenStore', () => {
     it('should respect ttlDays and pkPrefix options', async () => {
       mockSend.mockResolvedValueOnce({});
 
-      const store = new DynamoRefreshTokenStore('t', 'eu-west-1', {
+      const store = new DynamodbRefreshTokenProvider('t', 'eu-west-1', {
         ttlDays: 7,
         pkPrefix: 'custom#',
       });
@@ -87,7 +87,7 @@ describe('DynamoRefreshTokenStore', () => {
 
   describe('rotate', () => {
     it('should throw RefreshTokenInvalidError for malformed token before calling DynamoDB', async () => {
-      const store = new DynamoRefreshTokenStore('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       await expect(store.rotate({ refreshToken: '' })).rejects.toThrow(RefreshTokenInvalidError);
       await expect(store.rotate({ refreshToken: 'short' })).rejects.toThrow(RefreshTokenInvalidError);
       expect(mockSend).not.toHaveBeenCalled();
@@ -96,7 +96,7 @@ describe('DynamoRefreshTokenStore', () => {
     it('should throw RefreshTokenInvalidError when item is missing', async () => {
       mockSend.mockResolvedValueOnce({});
 
-      const store = new DynamoRefreshTokenStore('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toThrow(RefreshTokenInvalidError);
@@ -115,7 +115,7 @@ describe('DynamoRefreshTokenStore', () => {
         },
       });
 
-      const store = new DynamoRefreshTokenStore('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toThrow(RefreshTokenExpiredError);
@@ -133,7 +133,7 @@ describe('DynamoRefreshTokenStore', () => {
         },
       });
 
-      const store = new DynamoRefreshTokenStore('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toThrow(RefreshTokenRevokedError);
@@ -151,7 +151,7 @@ describe('DynamoRefreshTokenStore', () => {
         },
       });
 
-      const store = new DynamoRefreshTokenStore('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toThrow(RefreshTokenReusedError);
@@ -170,7 +170,7 @@ describe('DynamoRefreshTokenStore', () => {
         })
         .mockResolvedValueOnce({});
 
-      const store = new DynamoRefreshTokenStore('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       const out = await store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow });
 
       expect(mockSend).toHaveBeenCalledTimes(2);
@@ -194,7 +194,7 @@ describe('DynamoRefreshTokenStore', () => {
         })
         .mockRejectedValueOnce(Object.assign(new Error('tx'), { name: 'TransactionCanceledException' }));
 
-      const store = new DynamoRefreshTokenStore('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toThrow(RefreshTokenReusedError);
@@ -203,7 +203,7 @@ describe('DynamoRefreshTokenStore', () => {
 
   describe('revoke', () => {
     it('should throw RefreshTokenInvalidError for invalid token string', async () => {
-      const store = new DynamoRefreshTokenStore('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       await expect(store.revoke({ refreshToken: 'x' })).rejects.toThrow(RefreshTokenInvalidError);
       expect(mockSend).not.toHaveBeenCalled();
     });
@@ -211,7 +211,7 @@ describe('DynamoRefreshTokenStore', () => {
     it('should send update and return true on success', async () => {
       mockSend.mockResolvedValueOnce({});
 
-      const store = new DynamoRefreshTokenStore('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       const ok = await store.revoke({ refreshToken: VALID_TOKEN, now: fixedNow });
 
       expect(ok).toBe(true);
@@ -226,7 +226,7 @@ describe('DynamoRefreshTokenStore', () => {
         Object.assign(new Error('conditional'), { name: 'ConditionalCheckFailedException' }),
       );
 
-      const store = new DynamoRefreshTokenStore('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       const ok = await store.revoke({ refreshToken: VALID_TOKEN, now: fixedNow });
       expect(ok).toBe(true);
     });
