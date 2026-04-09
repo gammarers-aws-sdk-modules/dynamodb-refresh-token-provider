@@ -22,7 +22,7 @@ const DEFAULT_PRIMARY_KEY_PREFIX = 'rt#';
  *
  * This class owns the DynamoDB client; callers supply `tableName`, `region`, and optional {@link StoreOptions}.
  */
-export class DynamoRefreshTokenStore implements RefreshTokenStore {
+export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   /** Lazily initialized and cached document client. */
   private ddb: DynamoDBDocumentClient | null = null;
 

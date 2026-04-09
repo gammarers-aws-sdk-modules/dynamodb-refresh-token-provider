@@ -13,7 +13,7 @@ export type {
   EpochSec,
 } from './types/index';
 
-export { DynamoRefreshTokenStore } from './stores/dynamodb';
+export { DynamodbRefreshTokenProvider } from './stores/dynamodb';
 export {
   RefreshTokenError,
   RefreshTokenExpiredError,
