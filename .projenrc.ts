@@ -12,7 +12,6 @@ const project = new typescript.TypeScriptProject({
   deps: [
     '@aws-sdk/client-dynamodb@^3.777.0',
     '@aws-sdk/lib-dynamodb@^3.777.0',
-    '@aws-sdk/util-dynamodb@^3.777.0',
   ],
   releaseToNpm: true,
   npmTrustedPublishing: true,

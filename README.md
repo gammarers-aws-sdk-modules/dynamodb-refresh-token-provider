@@ -1,17 +1,19 @@
 # DynamoDB Refresh Token Provider
 
 [![npm version](https://img.shields.io/npm/v/dynamodb-refresh-token-provider.svg)](https://www.npmjs.com/package/dynamodb-refresh-token-provider)
-[![License](https://img.shields.io/npm/l/dynamodb-refresh-token-provider.svg)](https://github.com/gammarers-aws-sdk-extensions/athena-query-result-collector/blob/main/LICENSE)
-[![build](https://github.com/gammarers-aws-sdk-extensions/athena-query-result-collector/actions/workflows/build.yml/badge.svg)](https://github.com/gammarers-aws-sdk-extensions/athena-query-result-collector/actions/workflows/build.yml)
+[![License](https://img.shields.io/npm/l/dynamodb-refresh-token-provider.svg)](https://github.com/gammarers-aws-sdk-modules/dynamodb-refresh-token-provider/blob/main/LICENSE)
+[![build](https://github.com/gammarers-aws-sdk-modules/dynamodb-refresh-token-provider/actions/workflows/build.yml/badge.svg)](https://github.com/gammarers-aws-sdk-modules/dynamodb-refresh-token-provider/actions/workflows/build.yml)
 
 TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** using AWS SDK for JavaScript v3. Tokens are persisted under a hash of the plaintext value; **issue**, **rotate** (with reuse detection via a transactional write), and **revoke** (idempotent) are supported.
 
 ## Features
 
 - **`RefreshTokenStore` interface** — swap implementations while keeping the same API.
-- **`DynamodbRefreshTokenProvider`** — single-table design with partition key `pk` (string), strongly consistent reads by default.
-- **Rotation safety** — marks the old row as rotated and inserts the successor in one DynamoDB transaction; detects reuse and conflicting updates.
-- **Structured errors** — `RefreshTokenInvalidError`, `RefreshTokenExpiredError`, `RefreshTokenRevokedError`, `RefreshTokenReusedError`, and related types for `instanceof` handling.
+- **`DynamodbRefreshTokenProvider`** — single-table design with string partition key `pk` and strongly consistent reads by default.
+- **DynamoDB TTL** — writes `ttl` (Unix seconds) on `Put` and `TransactWriteItems` so expired and rotated rows can be removed automatically when table TTL is enabled.
+- **Logical expiration** — `expiresAt` drives validation; `ttl` is for storage cleanup only.
+- **Rotation safety** — marks the old row as rotated and inserts the successor in one transaction; detects reuse and conflicting updates.
+- **Structured errors** — `RefreshTokenError`, `RefreshTokenInvalidError`, `RefreshTokenExpiredError`, `RefreshTokenRevokedError`, `RefreshTokenReusedError`, and `RefreshTokenRotateFailedError` for `instanceof` handling.
 - **Utilities** — `sha256hex` and `randomtoken` for hashing and token generation aligned with the store.
 
 ## Installation
@@ -26,13 +28,15 @@ yarn add dynamodb-refresh-token-provider
 
 ## Usage
 
-Create a store with your table name, AWS region, and optional `StoreOptions`. Ensure your DynamoDB table has a **string partition key** named `pk` (same attribute name the library uses for items).
+Create a store with your table name, AWS region, and optional `StoreOptions`. Your DynamoDB table needs a **string partition key** named `pk`, and **TTL enabled** on attribute `ttl` (see [DynamoDB TTL](#dynamodb-ttl)).
 
 ```typescript
 import {
   DynamodbRefreshTokenProvider,
+  RefreshTokenExpiredError,
   RefreshTokenInvalidError,
   RefreshTokenReusedError,
+  RefreshTokenRevokedError,
 } from 'dynamodb-refresh-token-provider';
 
 const store = new DynamodbRefreshTokenProvider('your-refresh-token-table', 'us-east-1', {
@@ -46,18 +50,24 @@ const issued = await store.issue({
   sessionId: 'session-456',
 });
 // issued.refreshToken — send to the client (plaintext)
-// issued.refreshTokenExpiresAt — Unix seconds
+// issued.refreshTokenExpiresAt — Unix seconds (same as expiresAt / ttl on the item)
 
-// Rotate: exchange current token for a new one
+// Rotate: exchange the current token for a new one
 try {
   const rotated = await store.rotate({ refreshToken: issued.refreshToken });
   // rotated.refreshToken, rotated.refreshTokenExpiresAt, rotated.subjectId, rotated.sessionId
 } catch (e) {
   if (e instanceof RefreshTokenReusedError) {
-    // token was already rotated or transaction lost the race
+    // already rotated or lost a transactional race
   }
   if (e instanceof RefreshTokenInvalidError) {
     // unknown or malformed token
+  }
+  if (e instanceof RefreshTokenExpiredError) {
+    // past expiresAt
+  }
+  if (e instanceof RefreshTokenRevokedError) {
+    // revokedAt is set
   }
   throw e;
 }
@@ -66,23 +76,51 @@ try {
 await store.revoke({ refreshToken: issued.refreshToken });
 ```
 
+### DynamoDB TTL
+
+Each item includes:
+
+| Attribute | Purpose |
+|-----------|---------|
+| `expiresAt` | Logical expiration (Unix seconds); used by the library for validation. |
+| `ttl` | DynamoDB TTL attribute (Unix seconds); enable table TTL on this name for automatic deletion. |
+
+On **issue**, both are set to the same value. On **rotate**, the successor `Put` sets both to the new expiration; the previous row’s `ttl` is updated to its existing `expiresAt`. **Revoke** does not change `ttl` (the value from issue/rotate still applies).
+
+Enable TTL on your table once (per table/region). The TTL attribute name must be **`ttl`**.
+
+**AWS CLI**
+
+```bash
+aws dynamodb update-time-to-live \
+  --table-name your-refresh-token-table \
+  --time-to-live-specification "Enabled=true, AttributeName=ttl"
+```
+
+**AWS Console**
+
+1. Open the table → **Additional settings** → **Time to Live (TTL)**.
+2. Turn TTL on and set the attribute name to **`ttl`**.
+
+DynamoDB deletes items asynchronously, typically within 48 hours after `ttl` is in the past.
+
 ## Options
 
 Constructor: `new DynamodbRefreshTokenProvider(tableName, region, options?)`.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `ttlDays` | `number` | `60` | Lifetime of issued/rotated tokens in days (added to `now` in seconds). |
-| `pkPrefix` | `string` | `'rt#'` | Prefix for the partition key; full `pk` is `prefix` + SHA-256 hex of the plaintext token. |
+| `ttlDays` | `number` | `60` | Token lifetime in days; added to `now` when computing `expiresAt` and `ttl` (Unix seconds). |
+| `pkPrefix` | `string` | `'rt#'` | Partition key prefix; full `pk` is `prefix` + SHA-256 hex of the plaintext token. |
 | `consistentRead` | `boolean` | `true` | Use strongly consistent reads on `GetItem` when loading a token row. |
 | `endpoint` | `string` | (none) | Custom DynamoDB API endpoint (e.g. LocalStack or DynamoDB Local). |
 
-Method parameters also accept an optional `now?: Date` on `issue`, `rotate`, and `revoke` for testing or clock injection.
+`issue`, `rotate`, and `revoke` accept an optional `now?: Date` for testing or clock injection.
 
 ## Requirements
 
 - **Node.js** 20.0.0 or later.
-- A **DynamoDB table** with a string partition key attribute **`pk`**.
+- A **DynamoDB table** with a string partition key **`pk`** and **TTL enabled** on attribute **`ttl`** (see [DynamoDB TTL](#dynamodb-ttl)).
 - **AWS credentials** and permissions for `PutItem`, `GetItem`, `UpdateItem`, and `TransactWriteItems` on that table (and the configured `endpoint` if used).
 
 ## License

@@ -3,6 +3,9 @@
  * Use `instanceof` on concrete classes or this base for handling.
  */
 export abstract class RefreshTokenError extends Error {
+  /**
+   * @param message - Human-readable error description.
+   */
   protected constructor(message: string) {
     super(message);
     this.name = new.target.name;
@@ -13,6 +16,9 @@ export abstract class RefreshTokenError extends Error {
  * Thrown when the refresh token is missing, malformed, or not recognized.
  */
 export class RefreshTokenInvalidError extends RefreshTokenError {
+  /**
+   * @param message - Human-readable error description.
+   */
   constructor(
     message = 'The refresh token is missing, malformed, or not recognized.',
   ) {
@@ -21,9 +27,12 @@ export class RefreshTokenInvalidError extends RefreshTokenError {
 }
 
 /**
- * Thrown when the refresh token has passed its expiration time.
+ * Thrown when the refresh token has passed its logical expiration (`expiresAt`).
  */
 export class RefreshTokenExpiredError extends RefreshTokenError {
+  /**
+   * @param message - Human-readable error description.
+   */
   constructor(message = 'The refresh token has expired. Please sign in again.') {
     super(message);
   }
@@ -33,6 +42,9 @@ export class RefreshTokenExpiredError extends RefreshTokenError {
  * Thrown when the refresh token has been explicitly revoked.
  */
 export class RefreshTokenRevokedError extends RefreshTokenError {
+  /**
+   * @param message - Human-readable error description.
+   */
   constructor(message = 'The refresh token has been revoked.') {
     super(message);
   }
@@ -42,6 +54,9 @@ export class RefreshTokenRevokedError extends RefreshTokenError {
  * Thrown when a refresh token is presented after it has already been rotated (reuse detection).
  */
 export class RefreshTokenReusedError extends RefreshTokenError {
+  /**
+   * @param message - Human-readable error description.
+   */
   constructor(
     message = 'This refresh token has already been rotated and cannot be used again.',
   ) {
@@ -53,6 +68,9 @@ export class RefreshTokenReusedError extends RefreshTokenError {
  * Thrown when rotation fails for a reason other than reuse (e.g. transient store failure).
  */
 export class RefreshTokenRotateFailedError extends RefreshTokenError {
+  /**
+   * @param message - Human-readable error description.
+   */
   constructor(
     message = 'The refresh token could not be rotated. Please try signing in again.',
   ) {
