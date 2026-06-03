@@ -18,9 +18,12 @@ export { RefreshTokenStore, StoreOptions, TokenRecord, IssueParams, RotateParams
 const DEFAULT_PRIMARY_KEY_PREFIX = 'rt#';
 
 /**
- * {@link RefreshTokenStore} implementation using a single DynamoDB table.
+ * {@link RefreshTokenStore} implementation backed by a single DynamoDB table.
  *
- * This class owns the DynamoDB client; callers supply `tableName`, `region`, and optional {@link StoreOptions}.
+ * Items use partition key `pk`, logical expiration `expiresAt`, and DynamoDB TTL attribute `ttl`
+ * (Unix seconds). Enable table TTL on attribute `ttl` so expired and rotated rows are removed
+ * asynchronously. This class owns the DynamoDB client; callers supply `tableName`, `region`, and
+ * optional {@link StoreOptions}.
  */
 export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   /** Lazily initialized and cached document client. */
@@ -32,7 +35,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   /**
    * @param tableName - DynamoDB table name for refresh token items.
    * @param region - AWS region for the DynamoDB client.
-   * @param options - TTL, PK prefix, consistent reads, or custom endpoint.
+   * @param options - Token lifetime, PK prefix, consistent reads, or custom endpoint.
    */
   constructor(
     private readonly tableName: string,
@@ -41,7 +44,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   ) {}
 
   /**
-   * Inserts a new token record. Fails the put if the partition key already exists.
+   * Inserts a new token record with `expiresAt` and matching `ttl`. Fails the put if `pk` already exists.
    *
    * @param params - Subject, session, and optional clock (`now`).
    * @returns Plaintext refresh token and expiration as Unix seconds.
@@ -66,6 +69,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
           sessionId: params.sessionId,
           createdAt: nowSec,
           expiresAt,
+          ttl: expiresAt,
         },
         ConditionExpression: 'attribute_not_exists(pk)',
       }),
@@ -79,6 +83,9 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
 
   /**
    * Marks the current token as rotated and creates the successor row in one transaction.
+   *
+   * Updates the previous row’s `ttl` to its `expiresAt` and sets `ttl` on the new Put to the
+   * successor’s expiration so DynamoDB can delete both when appropriate.
    *
    * @param params - Client refresh token and optional clock (`now`).
    * @returns Subject, session, new plaintext token, and new expiration.
@@ -125,11 +132,15 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
             Update: {
               TableName: this.tableName,
               Key: { pk: currentPk },
-              UpdateExpression: 'SET rotatedAt = :now, replacedByPk = :nextPk',
+              UpdateExpression: 'SET rotatedAt = :now, replacedByPk = :nextPk, #ttl = :ttl',
               ConditionExpression: 'attribute_exists(pk) AND attribute_not_exists(rotatedAt) AND attribute_not_exists(revokedAt)',
+              ExpressionAttributeNames: {
+                '#ttl': 'ttl',
+              },
               ExpressionAttributeValues: {
                 ':now': nowSec,
                 ':nextPk': nextPk,
+                ':ttl': current.expiresAt,
               },
             },
           },
@@ -142,6 +153,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
                 sessionId: current.sessionId,
                 createdAt: nowSec,
                 expiresAt: nextRefreshTokenExpiresAt,
+                ttl: nextRefreshTokenExpiresAt,
               },
               ConditionExpression: 'attribute_not_exists(pk)',
             },
@@ -167,6 +179,8 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
 
   /**
    * Sets `revokedAt` on the token row. Missing items succeed (idempotent revoke).
+   *
+   * Does not update `ttl`; existing `ttl` from issue/rotate still applies for DynamoDB cleanup.
    *
    * @param params - Refresh token and optional clock (`now`).
    * @returns `true` after a successful update or no-op when the item is absent.
@@ -206,7 +220,11 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
     return true;
   };
 
-  /** Returns the cached client, creating it on first use. */
+  /**
+   * Returns the cached {@link DynamoDBDocumentClient}, creating it on first use.
+   *
+   * @returns Document client configured for `region` and optional `endpoint`.
+   */
   private getddb = (): DynamoDBDocumentClient => {
     if (!this.ddb) {
       const client = new DynamoDBClient({
@@ -223,7 +241,12 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
     return this.ddb;
   };
 
-  /** Loads a token row by partition key, or `null` if absent. */
+  /**
+   * Loads a token row by partition key.
+   *
+   * @param pk - Full partition key (`prefix` + hash).
+   * @returns Parsed {@link TokenRecord}, or `null` if the item does not exist.
+   */
   private getTokenRecord = async (pk: string): Promise<TokenRecord | null> => {
     const ddb = this.getddb();
 
@@ -237,24 +260,39 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
     return (res.Item as TokenRecord) ?? null;
   };
 
-  /** Effective PK prefix from options or {@link DEFAULT_PRIMARY_KEY_PREFIX}. */
+  /**
+   * Effective partition key prefix from {@link StoreOptions} or {@link DEFAULT_PRIMARY_KEY_PREFIX}.
+   *
+   * @returns Prefix string (e.g. `rt#`).
+   */
   private getPrimaryKeyPrefix = (): string => {
     return `${this.options?.pkPrefix ?? DEFAULT_PRIMARY_KEY_PREFIX}`;
   };
 
-  /** Full partition key: prefix + SHA-256 hex of the raw token. */
+  /**
+   * Builds the full partition key for a token hash.
+   *
+   * @param hash - SHA-256 hex digest of the plaintext token.
+   * @returns `prefix` + `hash`.
+   */
   private getPrimaryKey = (hash: string): string => {
     return `${this.getPrimaryKeyPrefix()}${hash}`;
   };
 
-  /** Expiration timestamp: `nowSec` plus TTL from options (default 60 days). */
+  /**
+   * Computes logical expiration (`expiresAt` / `ttl`) as `nowSec` plus {@link StoreOptions.ttlDays}.
+   *
+   * @param nowSec - Current time as Unix seconds.
+   * @returns Expiration timestamp in Unix seconds (default lifetime: 60 days).
+   */
   private makeExpiresAt = (nowSec: number): number => {
     return nowSec + (this.options?.ttlDays ?? 60) * 24 * 60 * 60;
   };
 
   /**
-   * Ensures the token is non-empty and matches the expected base64url length for `tokenBytes` (32 bytes → URL-safe base64 length).
+   * Ensures the token is non-empty and matches the expected base64url length for `tokenBytes`.
    *
+   * @param token - Plaintext refresh token from the client.
    * @throws {@link RefreshTokenInvalidError} When validation fails.
    */
   private validateRefreshToken(token: string): void {
