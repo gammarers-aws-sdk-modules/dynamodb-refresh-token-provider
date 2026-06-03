@@ -62,6 +62,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         sessionId: 'sess-1',
         createdAt: nowSec,
         expiresAt: nowSec + defaultTtlSec,
+        ttl: nowSec + defaultTtlSec,
       });
       expect(typeof (cmd.input.Item as { pk: string }).pk).toBe('string');
       expect(result.refreshToken.length).toBe(43);
@@ -80,6 +81,7 @@ describe('DynamodbRefreshTokenProvider', () => {
       const cmd = mockSend.mock.calls[0][0] as PutCommand;
       expect(cmd.input.Item).toMatchObject({
         expiresAt: nowSec + 7 * 24 * 60 * 60,
+        ttl: nowSec + 7 * 24 * 60 * 60,
       });
       expect((cmd.input.Item as { pk: string }).pk.startsWith('custom#')).toBe(true);
     });
@@ -174,7 +176,18 @@ describe('DynamodbRefreshTokenProvider', () => {
       const out = await store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow });
 
       expect(mockSend).toHaveBeenCalledTimes(2);
-      expect(mockSend.mock.calls[1][0]).toBeInstanceOf(TransactWriteCommand);
+      const txCmd = mockSend.mock.calls[1][0] as TransactWriteCommand;
+      expect(txCmd).toBeInstanceOf(TransactWriteCommand);
+      const update = txCmd.input.TransactItems?.[0]?.Update;
+      const put = txCmd.input.TransactItems?.[1]?.Put;
+      expect(update?.UpdateExpression).toContain('#ttl');
+      expect(update?.ExpressionAttributeValues).toMatchObject({
+        ':ttl': futureExpiresAt,
+      });
+      expect(put?.Item).toMatchObject({
+        expiresAt: nowSec + defaultTtlSec,
+        ttl: nowSec + defaultTtlSec,
+      });
       expect(out.subjectId).toBe('sub');
       expect(out.sessionId).toBe('sess');
       expect(out.refreshToken.length).toBe(43);
