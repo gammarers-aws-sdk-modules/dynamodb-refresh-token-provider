@@ -256,6 +256,58 @@ describe('DynamodbRefreshTokenProvider', () => {
         sessionId: 'sess',
       });
     });
+
+    it('should revoke session on TransactionCanceledException when revokeSessionOnReuse is true', async () => {
+      mockSend
+        .mockResolvedValueOnce({
+          Item: {
+            pk: 'rt#current',
+            subjectId: 'sub',
+            sessionId: 'sess',
+            createdAt: 1,
+            expiresAt: futureExpiresAt,
+          },
+        })
+        .mockRejectedValueOnce(Object.assign(new Error('tx'), { name: 'TransactionCanceledException' }))
+        .mockResolvedValueOnce({ Items: [{ pk: 'rt#current' }] })
+        .mockResolvedValueOnce({});
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+        revokeSessionOnReuse: true,
+      });
+      await expect(
+        store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
+      ).rejects.toMatchObject({
+        name: 'RefreshTokenReusedError',
+        subjectId: 'sub',
+        sessionId: 'sess',
+      });
+
+      expect(mockSend.mock.calls[2][0]).toBeInstanceOf(QueryCommand);
+      expect(mockSend.mock.calls[3][0]).toBeInstanceOf(UpdateCommand);
+    });
+
+    it('should rethrow non-TransactionCanceledException from transact write', async () => {
+      mockSend
+        .mockResolvedValueOnce({
+          Item: {
+            pk: 'rt#current',
+            subjectId: 'sub',
+            sessionId: 'sess',
+            createdAt: 1,
+            expiresAt: futureExpiresAt,
+          },
+        })
+        .mockRejectedValueOnce(Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' }));
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      await expect(
+        store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
+      ).rejects.toMatchObject({
+        name: 'ProvisionedThroughputExceededException',
+        message: 'throttled',
+      });
+    });
   });
 
   describe('revoke', () => {
@@ -286,6 +338,20 @@ describe('DynamodbRefreshTokenProvider', () => {
       const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       const ok = await store.revoke({ refreshToken: VALID_TOKEN, now: fixedNow });
       expect(ok).toBe(true);
+    });
+
+    it('should rethrow unexpected errors from update', async () => {
+      mockSend.mockRejectedValueOnce(
+        Object.assign(new Error('boom'), { name: 'InternalServerError' }),
+      );
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      await expect(
+        store.revoke({ refreshToken: VALID_TOKEN, now: fixedNow }),
+      ).rejects.toMatchObject({
+        name: 'InternalServerError',
+        message: 'boom',
+      });
     });
   });
 
@@ -365,6 +431,98 @@ describe('DynamodbRefreshTokenProvider', () => {
       const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       const result = await store.revokeSession({ sessionId: 'sess', now: fixedNow });
       expect(result.revokedCount).toBe(1);
+    });
+
+    it('should skip items whose pk is not a string and treat missing Items as empty', async () => {
+      mockSend
+        .mockResolvedValueOnce({
+          Items: [{ pk: 123 }, { pk: 'rt#ok' }],
+        })
+        .mockResolvedValueOnce({});
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const result = await store.revokeSession({ sessionId: 'sess', now: fixedNow });
+
+      expect(result.revokedCount).toBe(1);
+      expect(mockSend).toHaveBeenCalledTimes(2);
+      expect((mockSend.mock.calls[1][0] as UpdateCommand).input.Key).toEqual({ pk: 'rt#ok' });
+    });
+
+    it('should treat undefined Items as empty and return zero revoked', async () => {
+      mockSend.mockResolvedValueOnce({});
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const result = await store.revokeSession({ sessionId: 'sess', now: fixedNow });
+      expect(result.revokedCount).toBe(0);
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+
+    it('should rethrow unexpected errors from session token update', async () => {
+      mockSend
+        .mockResolvedValueOnce({
+          Items: [{ pk: 'rt#a' }],
+        })
+        .mockRejectedValueOnce(
+          Object.assign(new Error('denied'), { name: 'AccessDeniedException' }),
+        );
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      await expect(
+        store.revokeSession({ sessionId: 'sess', now: fixedNow }),
+      ).rejects.toMatchObject({
+        name: 'AccessDeniedException',
+        message: 'denied',
+      });
+    });
+  });
+
+  describe('options', () => {
+    it('should use custom endpoint when constructing the DynamoDB client', async () => {
+      mockSend.mockResolvedValueOnce({});
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+        endpoint: 'http://localhost:8000',
+      });
+      await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
+
+      expect(DynamoDBDocumentClient.from).toHaveBeenCalled();
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+
+    it('should reuse the document client across calls', async () => {
+      mockSend.mockResolvedValue({});
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
+      await store.issue({ subjectId: 'c', sessionId: 'd', now: fixedNow });
+
+      expect(DynamoDBDocumentClient.from).toHaveBeenCalledTimes(1);
+      expect(mockSend).toHaveBeenCalledTimes(2);
+    });
+
+    it('should default now to current Date when omitted', async () => {
+      mockSend
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({
+          Item: {
+            pk: 'rt#x',
+            subjectId: 's',
+            sessionId: 'sess',
+            createdAt: 1,
+            expiresAt: Math.floor(Date.now() / 1000) + defaultTtlSec,
+          },
+        })
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ Items: [] });
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      await store.issue({ subjectId: 'a', sessionId: 'b' });
+      await store.rotate({ refreshToken: VALID_TOKEN });
+      await store.revoke({ refreshToken: VALID_TOKEN });
+      await store.revokeSession({ sessionId: 'sess' });
+
+      expect(mockSend).toHaveBeenCalledTimes(5);
     });
   });
 });
