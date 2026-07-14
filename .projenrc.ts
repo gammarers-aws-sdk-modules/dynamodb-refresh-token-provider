@@ -2,7 +2,7 @@ import { javascript, typescript, github } from 'projen';
 const project = new typescript.TypeScriptProject({
   defaultReleaseBranch: 'main',
   name: 'dynamodb-refresh-token-provider',
-  packageManager: javascript.NodePackageManager.YARN_CLASSIC,
+  packageManager: javascript.NodePackageManager.NPM,
   projenrcTs: true,
   authorName: 'yicr',
   authorEmail: 'yicr@users.noreply.github.com',
@@ -40,8 +40,6 @@ const project = new typescript.TypeScriptProject({
     ],
   },
 });
-// Corepack は devEngines の `<2.0.0` だけだと `yarn@<2.0.0` となり失敗するため、Yarn 1 の具体版を指定する
-project.package.addField('packageManager', 'yarn@1.22.22');
 // package ignore .devcontainer directory
 project.addPackageIgnore('/.devcontainer');
 
