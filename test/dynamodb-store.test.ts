@@ -2,6 +2,7 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
+  QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
@@ -10,7 +11,6 @@ import {
   DynamodbRefreshTokenProvider,
   RefreshTokenExpiredError,
   RefreshTokenInvalidError,
-  RefreshTokenReusedError,
   RefreshTokenRevokedError,
 } from '../src';
 
@@ -156,7 +156,47 @@ describe('DynamodbRefreshTokenProvider', () => {
       const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
-      ).rejects.toThrow(RefreshTokenReusedError);
+      ).rejects.toMatchObject({
+        name: 'RefreshTokenReusedError',
+        subjectId: 's',
+        sessionId: 'sess',
+      });
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+
+    it('should revoke session then throw when revokeSessionOnReuse and rotatedAt is set', async () => {
+      mockSend
+        .mockResolvedValueOnce({
+          Item: {
+            pk: 'rt#x',
+            subjectId: 'sub',
+            sessionId: 'sess',
+            createdAt: 1,
+            expiresAt: futureExpiresAt,
+            rotatedAt: 1,
+          },
+        })
+        .mockResolvedValueOnce({
+          Items: [{ pk: 'rt#x' }, { pk: 'rt#y' }],
+        })
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({});
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+        revokeSessionOnReuse: true,
+      });
+      await expect(
+        store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
+      ).rejects.toMatchObject({
+        name: 'RefreshTokenReusedError',
+        subjectId: 'sub',
+        sessionId: 'sess',
+      });
+
+      expect(mockSend).toHaveBeenCalledTimes(4);
+      expect(mockSend.mock.calls[1][0]).toBeInstanceOf(QueryCommand);
+      expect(mockSend.mock.calls[2][0]).toBeInstanceOf(UpdateCommand);
+      expect(mockSend.mock.calls[3][0]).toBeInstanceOf(UpdateCommand);
     });
 
     it('should run transact write and return new token on success', async () => {
@@ -210,7 +250,11 @@ describe('DynamodbRefreshTokenProvider', () => {
       const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
-      ).rejects.toThrow(RefreshTokenReusedError);
+      ).rejects.toMatchObject({
+        name: 'RefreshTokenReusedError',
+        subjectId: 'sub',
+        sessionId: 'sess',
+      });
     });
   });
 
@@ -242,6 +286,85 @@ describe('DynamodbRefreshTokenProvider', () => {
       const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       const ok = await store.revoke({ refreshToken: VALID_TOKEN, now: fixedNow });
       expect(ok).toBe(true);
+    });
+  });
+
+  describe('revokeSession', () => {
+    it('should query session GSI and revoke each token row', async () => {
+      mockSend
+        .mockResolvedValueOnce({
+          Items: [{ pk: 'rt#a' }, { pk: 'rt#b' }],
+        })
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({});
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const result = await store.revokeSession({
+        sessionId: 'sess-1',
+        subjectId: 'sub-1',
+        now: fixedNow,
+      });
+
+      expect(result.revokedCount).toBe(2);
+      const query = mockSend.mock.calls[0][0] as QueryCommand;
+      expect(query).toBeInstanceOf(QueryCommand);
+      expect(query.input.IndexName).toBe('sessionId-index');
+      expect(query.input.KeyConditionExpression).toBe('sessionId = :sessionId');
+      expect(query.input.ExpressionAttributeValues).toEqual({
+        ':sessionId': 'sess-1',
+      });
+
+      const updateA = mockSend.mock.calls[1][0] as UpdateCommand;
+      expect(updateA.input.Key).toEqual({ pk: 'rt#a' });
+      expect(updateA.input.ConditionExpression).toBe(
+        'attribute_exists(pk) AND subjectId = :subjectId',
+      );
+      expect(updateA.input.ExpressionAttributeValues).toEqual({
+        ':now': nowSec,
+        ':subjectId': 'sub-1',
+      });
+    });
+
+    it('should use custom sessionIdIndexName and page through results', async () => {
+      mockSend
+        .mockResolvedValueOnce({
+          Items: [{ pk: 'rt#1' }],
+          LastEvaluatedKey: { sessionId: 'sess', pk: 'rt#1' },
+        })
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({
+          Items: [{ pk: 'rt#2' }],
+        })
+        .mockResolvedValueOnce({});
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+        sessionIdIndexName: 'custom-session-index',
+      });
+      const result = await store.revokeSession({ sessionId: 'sess', now: fixedNow });
+
+      expect(result.revokedCount).toBe(2);
+      expect((mockSend.mock.calls[0][0] as QueryCommand).input.IndexName).toBe(
+        'custom-session-index',
+      );
+      expect((mockSend.mock.calls[2][0] as QueryCommand).input.ExclusiveStartKey).toEqual({
+        sessionId: 'sess',
+        pk: 'rt#1',
+      });
+    });
+
+    it('should skip rows that fail conditional update', async () => {
+      mockSend
+        .mockResolvedValueOnce({
+          Items: [{ pk: 'rt#gone' }, { pk: 'rt#ok' }],
+        })
+        .mockRejectedValueOnce(
+          Object.assign(new Error('conditional'), { name: 'ConditionalCheckFailedException' }),
+        )
+        .mockResolvedValueOnce({});
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const result = await store.revokeSession({ sessionId: 'sess', now: fixedNow });
+      expect(result.revokedCount).toBe(1);
     });
   });
 });

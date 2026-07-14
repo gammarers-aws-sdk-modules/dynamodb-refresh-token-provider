@@ -1,5 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 
 import {
   RefreshTokenExpiredError,
@@ -7,23 +7,49 @@ import {
   RefreshTokenReusedError,
   RefreshTokenRevokedError,
 } from './refresh-token-errors';
-import type { RefreshTokenStore, StoreOptions, TokenRecord, IssueParams, RotateParams, RevokeParams, IssueResult, RotateResult } from '../types/index';
+import type {
+  RefreshTokenStore,
+  StoreOptions,
+  TokenRecord,
+  IssueParams,
+  RotateParams,
+  RevokeParams,
+  RevokeSessionParams,
+  RevokeSessionResult,
+  IssueResult,
+  RotateResult,
+} from '../types/index';
 import { randomtoken, sha256hex } from '../utils/hash';
 import { epochsec } from '../utils/time';
 
 /** Re-exported types for consumers that import the DynamoDB store module. */
-export { RefreshTokenStore, StoreOptions, TokenRecord, IssueParams, RotateParams, RevokeParams, IssueResult, RotateResult };
+export {
+  RefreshTokenStore,
+  StoreOptions,
+  TokenRecord,
+  IssueParams,
+  RotateParams,
+  RevokeParams,
+  RevokeSessionParams,
+  RevokeSessionResult,
+  IssueResult,
+  RotateResult,
+};
 
 /** Default partition key prefix for refresh token items. */
 const DEFAULT_PRIMARY_KEY_PREFIX = 'rt#';
+
+/** Default GSI name for querying token rows by `sessionId`. */
+const DEFAULT_SESSION_ID_INDEX_NAME = 'sessionId-index';
 
 /**
  * {@link RefreshTokenStore} implementation backed by a single DynamoDB table.
  *
  * Items use partition key `pk`, logical expiration `expiresAt`, and DynamoDB TTL attribute `ttl`
  * (Unix seconds). Enable table TTL on attribute `ttl` so expired and rotated rows are removed
- * asynchronously. This class owns the DynamoDB client; callers supply `tableName`, `region`, and
- * optional {@link StoreOptions}.
+ * asynchronously. Session-wide revocation requires a GSI whose partition key is `sessionId`
+ * (see {@link StoreOptions.sessionIdIndexName}). This class owns the DynamoDB client; callers
+ * supply `tableName`, `region`, and optional {@link StoreOptions}.
  */
 export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   /** Lazily initialized and cached document client. */
@@ -35,7 +61,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   /**
    * @param tableName - DynamoDB table name for refresh token items.
    * @param region - AWS region for the DynamoDB client.
-   * @param options - Token lifetime, PK prefix, consistent reads, or custom endpoint.
+   * @param options - Token lifetime, PK prefix, GSI name, reuse revocation, or custom endpoint.
    */
   constructor(
     private readonly tableName: string,
@@ -87,12 +113,17 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * Updates the previous row’s `ttl` to its `expiresAt` and sets `ttl` on the new Put to the
    * successor’s expiration so DynamoDB can delete both when appropriate.
    *
+   * When reuse is detected and {@link StoreOptions.revokeSessionOnReuse} is true, all tokens for
+   * the same `sessionId` and `subjectId` are revoked via {@link DynamodbRefreshTokenProvider.revokeSession}
+   * before throwing.
+   *
    * @param params - Client refresh token and optional clock (`now`).
    * @returns Subject, session, new plaintext token, and new expiration.
    * @throws {@link RefreshTokenInvalidError} When the token format is invalid or no row exists.
    * @throws {@link RefreshTokenExpiredError} When `expiresAt` is not after `now`.
    * @throws {@link RefreshTokenRevokedError} When the token row has `revokedAt` set.
-   * @throws {@link RefreshTokenReusedError} When the token was already rotated or the transaction indicates reuse.
+   * @throws {@link RefreshTokenReusedError} When the token was already rotated or the transaction
+   *   indicates reuse. Includes `subjectId` and `sessionId` from the loaded row.
    */
   public rotate = async (params: RotateParams): Promise<RotateResult> => {
     // validate refresh token
@@ -117,7 +148,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
       throw new RefreshTokenRevokedError();
     }
     if (current.rotatedAt) {
-      throw new RefreshTokenReusedError();
+      await this.handleRefreshTokenReuse(current, now);
     }
 
     const nextRefreshTokenExpiresAt = this.makeExpiresAt(nowSec);
@@ -164,7 +195,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
     } catch (error: unknown) {
       if (error instanceof Error && error.name === 'TransactionCanceledException') {
         // Treat conditional transaction failure as token reuse.
-        throw new RefreshTokenReusedError();
+        await this.handleRefreshTokenReuse(current, now);
       }
       throw error;
     }
@@ -218,6 +249,108 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
       throw error;
     }
     return true;
+  };
+
+  /**
+   * Sets `revokedAt` on every token row for the given `sessionId` (optionally filtered by `subjectId`).
+   *
+   * Queries the session GSI (partition key `sessionId`; `KEYS_ONLY` is enough), then updates each
+   * base-table item. When `subjectId` is set, it is required in the `UpdateItem` condition.
+   * Missing or non-matching items are skipped (idempotent). Paginate with `LastEvaluatedKey`.
+   *
+   * @param params - Session id, optional subject filter, and optional clock.
+   * @returns Count of rows updated with `revokedAt` in this call.
+   */
+  public revokeSession = async (params: RevokeSessionParams): Promise<RevokeSessionResult> => {
+    const ddb = this.getddb();
+
+    const now = params.now ?? new Date();
+    const nowSec = epochsec(now);
+    const indexName = this.options?.sessionIdIndexName ?? DEFAULT_SESSION_ID_INDEX_NAME;
+
+    let revokedCount = 0;
+    let exclusiveStartKey: Record<string, unknown> | undefined;
+
+    /** Whether another Query page is available after the previous response. */
+    const shouldContinuePaging = (): boolean => exclusiveStartKey !== undefined;
+
+    do {
+      const res = await ddb.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          IndexName: indexName,
+          KeyConditionExpression: 'sessionId = :sessionId',
+          ExpressionAttributeValues: {
+            ':sessionId': params.sessionId,
+          },
+          ProjectionExpression: 'pk',
+          ExclusiveStartKey: exclusiveStartKey,
+        }),
+      );
+
+      const items = res.Items ?? [];
+      for (const item of items) {
+        const pk = item.pk;
+        if (typeof pk !== 'string') {
+          continue;
+        }
+
+        const expressionAttributeValues: Record<string, string | number> = {
+          ':now': nowSec,
+        };
+        let conditionExpression = 'attribute_exists(pk)';
+        if (params.subjectId) {
+          conditionExpression = 'attribute_exists(pk) AND subjectId = :subjectId';
+          expressionAttributeValues[':subjectId'] = params.subjectId;
+        }
+
+        try {
+          await ddb.send(
+            new UpdateCommand({
+              TableName: this.tableName,
+              Key: { pk },
+              UpdateExpression: 'SET revokedAt = :now',
+              ConditionExpression: conditionExpression,
+              ExpressionAttributeValues: expressionAttributeValues,
+            }),
+          );
+          revokedCount += 1;
+        } catch (error: unknown) {
+          if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
+            continue;
+          }
+          throw error;
+        }
+      }
+
+      exclusiveStartKey = res.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (shouldContinuePaging());
+
+    return { revokedCount };
+  };
+
+  /**
+   * Handles refresh-token reuse detection: optionally cascades {@link DynamodbRefreshTokenProvider.revokeSession}
+   * when {@link StoreOptions.revokeSessionOnReuse} is true, then throws {@link RefreshTokenReusedError}
+   * populated with `subjectId` / `sessionId` from `current`.
+   *
+   * @param current - Token row that indicated reuse (`rotatedAt` set or transaction canceled).
+   * @param now - Clock used for `revokedAt` when cascading revoke is enabled.
+   * @throws {@link RefreshTokenReusedError} Always (return type is `never`).
+   */
+  private handleRefreshTokenReuse = async (current: TokenRecord, now: Date): Promise<never> => {
+    if (this.options?.revokeSessionOnReuse) {
+      await this.revokeSession({
+        sessionId: current.sessionId,
+        subjectId: current.subjectId,
+        now,
+      });
+    }
+
+    throw new RefreshTokenReusedError(undefined, {
+      subjectId: current.subjectId,
+      sessionId: current.sessionId,
+    });
   };
 
   /**

@@ -33,4 +33,16 @@ describe('refresh token errors', () => {
     const err = new RefreshTokenInvalidError('custom');
     expect(err.message).toBe('custom');
   });
+
+  it('should attach subjectId and sessionId on RefreshTokenReusedError', () => {
+    const err = new RefreshTokenReusedError(undefined, {
+      subjectId: 'sub-1',
+      sessionId: 'sess-1',
+    });
+    expect(err.subjectId).toBe('sub-1');
+    expect(err.sessionId).toBe('sess-1');
+    expect(err.message).toBe(
+      'This refresh token has already been rotated and cannot be used again.',
+    );
+  });
 });
