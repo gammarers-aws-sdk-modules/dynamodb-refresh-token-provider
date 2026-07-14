@@ -5,7 +5,9 @@ export type EpochSec = number;
  * Configuration for the DynamoDB refresh token provider constructor.
  *
  * Token lifetime (`ttlDays`) drives both logical expiration (`expiresAt`) and the
- * DynamoDB TTL attribute (`ttl`) written on Put / Transact.
+ * DynamoDB TTL attribute (`ttl`) written on Put / Transact. Session revocation options
+ * (`sessionIdIndexName`, `revokeSessionOnReuse`) require a GSI whose partition key is
+ * `sessionId`.
  */
 export type StoreOptions = {
   /**
@@ -30,6 +32,22 @@ export type StoreOptions = {
    * Custom DynamoDB API endpoint (e.g. LocalStack or DynamoDB Local).
    */
   endpoint?: string;
+
+  /**
+   * DynamoDB GSI name whose partition key attribute is `sessionId` (String).
+   * Required for {@link RefreshTokenStore.revokeSession} and for `revokeSessionOnReuse`.
+   * `KEYS_ONLY` projection is sufficient.
+   * @defaultValue `'sessionId-index'`
+   */
+  sessionIdIndexName?: string;
+
+  /**
+   * When true, {@link RefreshTokenStore.rotate} calls {@link RefreshTokenStore.revokeSession}
+   * for the token’s `sessionId` and `subjectId` before throwing {@link RefreshTokenReusedError}.
+   * Aligns with OAuth 2.0 BCP refresh-token family revocation on reuse detection.
+   * @defaultValue false
+   */
+  revokeSessionOnReuse?: boolean;
 };
 
 /** Parameters for {@link RefreshTokenStore.issue}. */
@@ -78,6 +96,26 @@ export type RevokeParams = {
   now?: Date;
 };
 
+/** Parameters for {@link RefreshTokenStore.revokeSession}. */
+export type RevokeSessionParams = {
+  /** Session whose refresh token rows should all be revoked. */
+  sessionId: string;
+  /**
+   * When set, only rows matching this subject are revoked.
+   * Applied as an `UpdateItem` condition on the base table (not a GSI filter), so a
+   * `KEYS_ONLY` session GSI is sufficient.
+   */
+  subjectId?: string;
+  /** Clock override for tests; defaults to `new Date()`. */
+  now?: Date;
+};
+
+/** Result of {@link RefreshTokenStore.revokeSession}. */
+export type RevokeSessionResult = {
+  /** Number of token rows successfully updated with `revokedAt` in this call. */
+  revokedCount: number;
+};
+
 /**
  * DynamoDB item shape for a stored refresh token (hash-keyed by `pk`).
  *
@@ -87,9 +125,12 @@ export type RevokeParams = {
 export type TokenRecord = {
   /** Partition key: prefix + SHA-256 hex of the plaintext token. */
   pk: string;
-  /** Subject (user) identifier. */
+  /** Subject (user) identifier; also used when cascading session revoke on reuse. */
   subjectId: string;
-  /** Session identifier. */
+  /**
+   * Session identifier. Partition key of the session GSI used by
+   * {@link RefreshTokenStore.revokeSession}.
+   */
   sessionId: string;
   /** Row creation time as Unix seconds. */
   createdAt: EpochSec;
@@ -108,7 +149,7 @@ export type TokenRecord = {
 };
 
 /**
- * Persistence abstraction for opaque refresh tokens: issue, rotate, and revoke.
+ * Persistence abstraction for opaque refresh tokens: issue, rotate, revoke, and session revoke.
  */
 export interface RefreshTokenStore {
   /**
@@ -122,21 +163,38 @@ export interface RefreshTokenStore {
   /**
    * Validates the current token, marks it rotated, inserts the successor row, and returns the new token.
    *
+   * When reuse is detected and {@link StoreOptions.revokeSessionOnReuse} is enabled, the
+   * implementation may revoke the whole session before throwing.
+   *
    * @param params - Current token and optional clock.
    * @returns Subject, session, new token, and new expiration.
    * @throws {@link RefreshTokenInvalidError} When the token is invalid or no row exists.
    * @throws {@link RefreshTokenExpiredError} When `expiresAt` is not after `now`.
    * @throws {@link RefreshTokenRevokedError} When the row has `revokedAt` set.
-   * @throws {@link RefreshTokenReusedError} When the token was already rotated or the transaction failed conditionally.
+   * @throws {@link RefreshTokenReusedError} When the token was already rotated or the transaction
+   *   failed conditionally. May include `subjectId` / `sessionId` from the store row.
    */
   rotate(params: RotateParams): Promise<RotateResult>;
 
   /**
    * Sets `revokedAt` on the token row. Idempotent if the row does not exist.
    *
+   * Does not change DynamoDB TTL (`ttl`); cleanup still follows the value from issue/rotate.
+   *
    * @param params - Token to revoke and optional clock.
    * @returns `true` after a successful update or no-op when the item is absent.
    * @throws {@link RefreshTokenInvalidError} When the token string format is invalid.
    */
   revoke(params: RevokeParams): Promise<true>;
+
+  /**
+   * Sets `revokedAt` on every refresh token row for the given session (OAuth 2.0 BCP family revocation).
+   *
+   * Requires a DynamoDB GSI whose partition key is `sessionId` (see {@link StoreOptions.sessionIdIndexName}).
+   * Optional `subjectId` is enforced on each base-table update condition.
+   *
+   * @param params - Session id, optional subject filter, and optional clock.
+   * @returns Count of rows updated with `revokedAt`.
+   */
+  revokeSession(params: RevokeSessionParams): Promise<RevokeSessionResult>;
 }
