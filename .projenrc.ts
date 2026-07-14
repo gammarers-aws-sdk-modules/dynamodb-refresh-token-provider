@@ -6,7 +6,7 @@ const project = new typescript.TypeScriptProject({
   projenrcTs: true,
   authorName: 'yicr',
   authorEmail: 'yicr@users.noreply.github.com',
-  typescriptVersion: '5.9.x',
+  typescriptVersion: '6.0.x',
   repository: 'https://github.com/gammarers-aws-sdk-modules/dynamodb-refresh-token-provider.git',
   description: 'TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** using AWS SDK for JavaScript v3. Tokens are persisted under a hash of the plaintext value; **issue**, **rotate** (with reuse detection via a transactional write), **revoke** (idempotent), and **revokeSession** (OAuth 2.0 BCP family revocation) are supported.',
   deps: [
