@@ -1,6 +1,6 @@
 {
   "name": "dynamodb-refresh-token-provider",
-  "description": "TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** using AWS SDK for JavaScript v3. Tokens are persisted under a hash of the plaintext value; **issue**, **rotate** (with reuse detection via a transactional write), and **revoke** (idempotent) are supported.",
+  "description": "TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** using AWS SDK for JavaScript v3. Tokens are persisted under a hash of the plaintext value; **issue**, **rotate** (with reuse detection via a transactional write), **revoke** (idempotent), and **revokeSession** (OAuth 2.0 BCP family revocation) are supported.",
   "repository": {
     "type": "git",
     "url": "https://github.com/gammarers-aws-sdk-modules/dynamodb-refresh-token-provider.git"
