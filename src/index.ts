@@ -1,8 +1,8 @@
 /**
  * Public API: refresh token store types, DynamoDB-backed implementation, structured errors, and crypto helpers.
  *
- * Enable DynamoDB TTL on attribute `ttl`, and a `sessionId` GSI for session revocation, when using
- * {@link DynamodbRefreshTokenProvider}.
+ * Enable DynamoDB TTL on attribute `ttl`, and GSIs on `sessionId` and `subjectId` for bulk
+ * revocation, when using {@link DynamodbRefreshTokenProvider}.
  */
 export type {
   RefreshTokenStore,
@@ -13,6 +13,9 @@ export type {
   RevokeParams,
   RevokeSessionParams,
   RevokeSessionResult,
+  RevokeSubjectParams,
+  RevokeSubjectResult,
+  DocumentClientTranslateConfig,
   StoreOptions,
   TokenRecord,
   EpochSec,
@@ -20,7 +23,8 @@ export type {
 
 /**
  * DynamoDB-backed {@link RefreshTokenStore} with rotation reuse detection and optional
- * session-wide revocation (`revokeSession` / `revokeSessionOnReuse`).
+ * session-wide revocation (`revokeSession` / `revokeSessionOnReuse`) and subject-wide
+ * revocation (`revokeSubject`).
  */
 export { DynamodbRefreshTokenProvider } from './stores/dynamodb';
 

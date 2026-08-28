@@ -10,12 +10,15 @@ import {
 import type {
   RefreshTokenStore,
   StoreOptions,
+  DocumentClientTranslateConfig,
   TokenRecord,
   IssueParams,
   RotateParams,
   RevokeParams,
   RevokeSessionParams,
   RevokeSessionResult,
+  RevokeSubjectParams,
+  RevokeSubjectResult,
   IssueResult,
   RotateResult,
 } from '../types/index';
@@ -26,12 +29,15 @@ import { epochsec } from '../utils/time';
 export {
   RefreshTokenStore,
   StoreOptions,
+  DocumentClientTranslateConfig,
   TokenRecord,
   IssueParams,
   RotateParams,
   RevokeParams,
   RevokeSessionParams,
   RevokeSessionResult,
+  RevokeSubjectParams,
+  RevokeSubjectResult,
   IssueResult,
   RotateResult,
 };
@@ -41,6 +47,15 @@ const DEFAULT_PRIMARY_KEY_PREFIX = 'rt#';
 
 /** Default GSI name for querying token rows by `sessionId`. */
 const DEFAULT_SESSION_ID_INDEX_NAME = 'sessionId-index';
+
+/** Default GSI name for querying token rows by `subjectId`. */
+const DEFAULT_SUBJECT_ID_INDEX_NAME = 'subjectId-index';
+
+/** Default random byte length for generated refresh tokens (32 → 256-bit). */
+const DEFAULT_TOKEN_BYTES = 32;
+
+/** Default token lifetime in days when neither ttlSeconds nor ttlDays is set. */
+const DEFAULT_TTL_DAYS = 60;
 
 /**
  * {@link RefreshTokenStore} implementation backed by a single DynamoDB table.
@@ -55,8 +70,8 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   /** Lazily initialized and cached document client. */
   private ddb: DynamoDBDocumentClient | null = null;
 
-  /** Random byte length for generated refresh tokens (default 32 → 256-bit). */
-  private readonly tokenBytes = 32;
+  /** Random byte length for generated refresh tokens. */
+  private readonly tokenBytes: number;
 
   /**
    * @param tableName - DynamoDB table name for refresh token items.
@@ -67,7 +82,10 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
     private readonly tableName: string,
     private readonly region: string,
     private readonly options?: StoreOptions,
-  ) {}
+  ) {
+    this.tokenBytes = this.resolveTokenBytes(this.options?.tokenBytes);
+    this.validateTtlOptions(this.options);
+  }
 
   /**
    * Inserts a new token record with `expiresAt` and matching `ttl`. Fails the put if `pk` already exists.
@@ -262,11 +280,70 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * @returns Count of rows updated with `revokedAt` in this call.
    */
   public revokeSession = async (params: RevokeSessionParams): Promise<RevokeSessionResult> => {
-    const ddb = this.getddb();
-
     const now = params.now ?? new Date();
     const nowSec = epochsec(now);
     const indexName = this.options?.sessionIdIndexName ?? DEFAULT_SESSION_ID_INDEX_NAME;
+
+    const revokedCount = await this.revokeTokenRowsByIndexQuery({
+      indexName,
+      keyConditionExpression: 'sessionId = :sessionId',
+      queryExpressionAttributeValues: {
+        ':sessionId': params.sessionId,
+      },
+      nowSec,
+      updateConditionExpression: params.subjectId
+        ? 'attribute_exists(pk) AND subjectId = :subjectId'
+        : 'attribute_exists(pk)',
+      updateExpressionAttributeValues: params.subjectId
+        ? { ':subjectId': params.subjectId }
+        : undefined,
+    });
+
+    return { revokedCount };
+  };
+
+  /**
+   * Sets `revokedAt` on every refresh token row for the given `subjectId` across all sessions.
+   *
+   * Queries the subject GSI (partition key `subjectId`; `KEYS_ONLY` is enough), then updates each
+   * base-table item. Missing items are skipped (idempotent). Paginate with `LastEvaluatedKey`.
+   *
+   * @param params - Subject id and optional clock.
+   * @returns Count of rows updated with `revokedAt` in this call.
+   */
+  public revokeSubject = async (params: RevokeSubjectParams): Promise<RevokeSubjectResult> => {
+    const now = params.now ?? new Date();
+    const nowSec = epochsec(now);
+    const indexName = this.options?.subjectIdIndexName ?? DEFAULT_SUBJECT_ID_INDEX_NAME;
+
+    const revokedCount = await this.revokeTokenRowsByIndexQuery({
+      indexName,
+      keyConditionExpression: 'subjectId = :subjectId',
+      queryExpressionAttributeValues: {
+        ':subjectId': params.subjectId,
+      },
+      nowSec,
+      updateConditionExpression: 'attribute_exists(pk)',
+    });
+
+    return { revokedCount };
+  };
+
+  /**
+   * Queries a GSI and sets `revokedAt` on each matching base-table row.
+   *
+   * @param params - GSI query parameters and per-row update conditions.
+   * @returns Count of rows updated with `revokedAt` in this call.
+   */
+  private revokeTokenRowsByIndexQuery = async (params: {
+    indexName: string;
+    keyConditionExpression: string;
+    queryExpressionAttributeValues: Record<string, string>;
+    nowSec: number;
+    updateConditionExpression: string;
+    updateExpressionAttributeValues?: Record<string, string>;
+  }): Promise<number> => {
+    const ddb = this.getddb();
 
     let revokedCount = 0;
     let exclusiveStartKey: Record<string, unknown> | undefined;
@@ -278,11 +355,9 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
       const res = await ddb.send(
         new QueryCommand({
           TableName: this.tableName,
-          IndexName: indexName,
-          KeyConditionExpression: 'sessionId = :sessionId',
-          ExpressionAttributeValues: {
-            ':sessionId': params.sessionId,
-          },
+          IndexName: params.indexName,
+          KeyConditionExpression: params.keyConditionExpression,
+          ExpressionAttributeValues: params.queryExpressionAttributeValues,
           ProjectionExpression: 'pk',
           ExclusiveStartKey: exclusiveStartKey,
         }),
@@ -296,13 +371,9 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
         }
 
         const expressionAttributeValues: Record<string, string | number> = {
-          ':now': nowSec,
+          ':now': params.nowSec,
+          ...params.updateExpressionAttributeValues,
         };
-        let conditionExpression = 'attribute_exists(pk)';
-        if (params.subjectId) {
-          conditionExpression = 'attribute_exists(pk) AND subjectId = :subjectId';
-          expressionAttributeValues[':subjectId'] = params.subjectId;
-        }
 
         try {
           await ddb.send(
@@ -310,7 +381,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
               TableName: this.tableName,
               Key: { pk },
               UpdateExpression: 'SET revokedAt = :now',
-              ConditionExpression: conditionExpression,
+              ConditionExpression: params.updateConditionExpression,
               ExpressionAttributeValues: expressionAttributeValues,
             }),
           );
@@ -326,7 +397,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
       exclusiveStartKey = res.LastEvaluatedKey as Record<string, unknown> | undefined;
     } while (shouldContinuePaging());
 
-    return { revokedCount };
+    return revokedCount;
   };
 
   /**
@@ -369,7 +440,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
           return `https://dynamodb.${this.region}.amazonaws.com`;
         })(),
       });
-      this.ddb = DynamoDBDocumentClient.from(client);
+      this.ddb = DynamoDBDocumentClient.from(client, this.options?.translateConfig);
     }
     return this.ddb;
   };
@@ -413,13 +484,47 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   };
 
   /**
-   * Computes logical expiration (`expiresAt` / `ttl`) as `nowSec` plus {@link StoreOptions.ttlDays}.
+   * Computes logical expiration (`expiresAt` / `ttl`) as `nowSec` plus configured lifetime.
    *
    * @param nowSec - Current time as Unix seconds.
-   * @returns Expiration timestamp in Unix seconds (default lifetime: 60 days).
+   * @returns Expiration timestamp in Unix seconds.
    */
   private makeExpiresAt = (nowSec: number): number => {
-    return nowSec + (this.options?.ttlDays ?? 60) * 24 * 60 * 60;
+    const ttlSeconds = this.options?.ttlSeconds;
+    if (ttlSeconds !== undefined) {
+      return nowSec + ttlSeconds;
+    }
+    return nowSec + (this.options?.ttlDays ?? DEFAULT_TTL_DAYS) * 24 * 60 * 60;
+  };
+
+  /**
+   * Resolves and validates {@link StoreOptions.tokenBytes}.
+   *
+   * @param tokenBytes - Optional byte length from store options.
+   * @returns Positive integer byte length.
+   * @throws {RangeError} When `tokenBytes` is not a positive integer.
+   */
+  private resolveTokenBytes = (tokenBytes?: number): number => {
+    const bytes = tokenBytes ?? DEFAULT_TOKEN_BYTES;
+    if (!Number.isInteger(bytes) || bytes < 1) {
+      throw new RangeError('tokenBytes must be a positive integer');
+    }
+    return bytes;
+  };
+
+  /**
+   * Validates TTL-related store options at construction time.
+   *
+   * @param options - Store options from the constructor.
+   * @throws {RangeError} When `ttlSeconds` or `ttlDays` is not a positive number.
+   */
+  private validateTtlOptions = (options?: StoreOptions): void => {
+    if (options?.ttlSeconds !== undefined && options.ttlSeconds <= 0) {
+      throw new RangeError('ttlSeconds must be a positive number');
+    }
+    if (options?.ttlDays !== undefined && options.ttlDays <= 0) {
+      throw new RangeError('ttlDays must be a positive number');
+    }
   };
 
   /**

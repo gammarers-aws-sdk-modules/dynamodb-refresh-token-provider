@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/npm/l/dynamodb-refresh-token-provider.svg)](https://github.com/gammarers-aws-sdk-modules/dynamodb-refresh-token-provider/blob/main/LICENSE)
 [![build](https://github.com/gammarers-aws-sdk-modules/dynamodb-refresh-token-provider/actions/workflows/build.yml/badge.svg)](https://github.com/gammarers-aws-sdk-modules/dynamodb-refresh-token-provider/actions/workflows/build.yml)
 
-TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** using AWS SDK for JavaScript v3. Tokens are persisted under a hash of the plaintext value; **issue**, **rotate** (with reuse detection via a transactional write), **revoke** (idempotent), and **revokeSession** (session-wide family revocation) are supported.
+TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** using AWS SDK for JavaScript v3. Tokens are persisted under a hash of the plaintext value; **issue**, **rotate** (with reuse detection via a transactional write), **revoke** (idempotent), **revokeSession** (session-wide family revocation), and **revokeSubject** (subject-wide revocation across all sessions) are supported.
 
 ## Features
 
@@ -14,6 +14,7 @@ TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** 
 - **Logical expiration** — `expiresAt` drives validation; `ttl` is for storage cleanup only.
 - **Rotation safety** — marks the old row as rotated and inserts the successor in one transaction; detects reuse and conflicting updates.
 - **Session revocation (OAuth 2.0 BCP)** — `revokeSession({ sessionId })` revokes all tokens for a session via a `sessionId` GSI; optional `revokeSessionOnReuse` cascades on reuse detection.
+- **Subject revocation** — `revokeSubject({ subjectId })` revokes every token for a user across all sessions via a `subjectId` GSI (logout all devices, password change, account suspension).
 - **Structured errors** — `RefreshTokenError`, `RefreshTokenInvalidError`, `RefreshTokenExpiredError`, `RefreshTokenRevokedError`, `RefreshTokenReusedError` (with optional `subjectId` / `sessionId`), and `RefreshTokenRotateFailedError` for `instanceof` handling.
 - **Utilities** — `sha256hex` and `randomtoken` for hashing and token generation aligned with the store.
 
@@ -29,7 +30,7 @@ yarn add dynamodb-refresh-token-provider
 
 ## Usage
 
-Create a store with your table name, AWS region, and optional `StoreOptions`. Your DynamoDB table needs a **string partition key** named `pk`, **TTL enabled** on attribute `ttl` (see [DynamoDB TTL](#dynamodb-ttl)), and a **GSI** on `sessionId` for session revocation (see [Session GSI](#session-gsi)).
+Create a store with your table name, AWS region, and optional `StoreOptions`. Your DynamoDB table needs a **string partition key** named `pk`, **TTL enabled** on attribute `ttl` (see [DynamoDB TTL](#dynamodb-ttl)), a **GSI** on `sessionId` for session revocation (see [Session GSI](#session-gsi)), and a **GSI** on `subjectId` for subject-wide revocation (see [Subject GSI](#subject-gsi)).
 
 ```typescript
 import {
@@ -42,10 +43,14 @@ import {
 
 const store = new DynamodbRefreshTokenProvider('your-refresh-token-table', 'us-east-1', {
   ttlDays: 60,
+  // ttlSeconds: 3600, // alternative to ttlDays; takes precedence when both are set
+  // tokenBytes: 32,
   pkPrefix: 'rt#',
+  // translateConfig: { marshallOptions: { removeUndefinedValues: true } },
   // Optional: revoke every token in the session when reuse is detected (OAuth 2.0 BCP)
   // revokeSessionOnReuse: true,
   // sessionIdIndexName: 'sessionId-index',
+  // subjectIdIndexName: 'subjectId-index',
 });
 
 // Issue a new refresh token for a subject/session
@@ -85,6 +90,9 @@ await store.revoke({ refreshToken: issued.refreshToken });
 
 // Revoke all tokens for a session (requires sessionId GSI)
 await store.revokeSession({ sessionId: 'session-456', subjectId: 'user-123' });
+
+// Revoke all tokens for a subject across every session (requires subjectId GSI)
+await store.revokeSubject({ subjectId: 'user-123' });
 ```
 
 ### DynamoDB TTL
@@ -96,7 +104,7 @@ Each item includes:
 | `expiresAt` | Logical expiration (Unix seconds); used by the library for validation. |
 | `ttl` | DynamoDB TTL attribute (Unix seconds); enable table TTL on this name for automatic deletion. |
 
-On **issue**, both are set to the same value. On **rotate**, the successor `Put` sets both to the new expiration; the previous row’s `ttl` is updated to its existing `expiresAt`. **Revoke** / **revokeSession** do not change `ttl` (the value from issue/rotate still applies).
+On **issue**, both are set to the same value. On **rotate**, the successor `Put` sets both to the new expiration; the previous row’s `ttl` is updated to its existing `expiresAt`. **Revoke**, **revokeSession**, and **revokeSubject** do not change `ttl` (the value from issue/rotate still applies).
 
 Enable TTL on your table once (per table/region). The TTL attribute name must be **`ttl`**.
 
@@ -140,25 +148,54 @@ aws dynamodb update-table \
   }]'
 ```
 
+### Subject GSI
+
+`revokeSubject` queries token rows by `subjectId` to revoke every refresh token for a user (e.g. logout all devices, password change, account suspension). Create a GSI whose **partition key** is the attribute **`subjectId`** (String). `KEYS_ONLY` projection is enough (base-table `pk` is always projected).
+
+| Setting | Value |
+|---------|--------|
+| Index name | `subjectId-index` (override with `subjectIdIndexName`) |
+| Partition key | `subjectId` (S) |
+| Projection | `KEYS_ONLY` (or `ALL`) |
+
+**AWS CLI** (example; adjust billing mode / capacity as needed)
+
+```bash
+aws dynamodb update-table \
+  --table-name your-refresh-token-table \
+  --attribute-definitions AttributeName=subjectId,AttributeType=S \
+  --global-secondary-index-updates '[{
+    "Create": {
+      "IndexName": "subjectId-index",
+      "KeySchema": [{"AttributeName": "subjectId", "KeyType": "HASH"}],
+      "Projection": {"ProjectionType": "KEYS_ONLY"}
+    }
+  }]'
+```
+
 ## Options
 
 Constructor: `new DynamodbRefreshTokenProvider(tableName, region, options?)`.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `ttlDays` | `number` | `60` | Token lifetime in days; added to `now` when computing `expiresAt` and `ttl` (Unix seconds). |
+| `ttlDays` | `number` | `60` | Token lifetime in days; added to `now` when computing `expiresAt` and `ttl` (Unix seconds). Ignored when `ttlSeconds` is set. |
+| `ttlSeconds` | `number` | (none) | Token lifetime in seconds; takes precedence over `ttlDays` when both are set. |
+| `tokenBytes` | `number` | `32` | Random byte length for generated refresh tokens (e.g. `32` → 256-bit). |
+| `translateConfig` | `DocumentClientTranslateConfig` | (none) | Pass-through to `DynamoDBDocumentClient.from` (e.g. `marshallOptions.removeUndefinedValues`). |
 | `pkPrefix` | `string` | `'rt#'` | Partition key prefix; full `pk` is `prefix` + SHA-256 hex of the plaintext token. |
 | `consistentRead` | `boolean` | `true` | Use strongly consistent reads on `GetItem` when loading a token row. |
 | `endpoint` | `string` | (none) | Custom DynamoDB API endpoint (e.g. LocalStack or DynamoDB Local). |
 | `sessionIdIndexName` | `string` | `'sessionId-index'` | GSI name whose partition key is `sessionId` (required for `revokeSession`). |
+| `subjectIdIndexName` | `string` | `'subjectId-index'` | GSI name whose partition key is `subjectId` (required for `revokeSubject`). |
 | `revokeSessionOnReuse` | `boolean` | `false` | When true, `rotate` calls `revokeSession` for the token’s session before throwing `RefreshTokenReusedError`. |
 
-`issue`, `rotate`, `revoke`, and `revokeSession` accept an optional `now?: Date` for testing or clock injection.
+`issue`, `rotate`, `revoke`, `revokeSession`, and `revokeSubject` accept an optional `now?: Date` for testing or clock injection.
 
 ## Requirements
 
 - **Node.js** 20.0.0 or later.
-- A **DynamoDB table** with a string partition key **`pk`**, **TTL enabled** on attribute **`ttl`** (see [DynamoDB TTL](#dynamodb-ttl)), and a **GSI** on **`sessionId`** for session revocation (see [Session GSI](#session-gsi)).
+- A **DynamoDB table** with a string partition key **`pk`**, **TTL enabled** on attribute **`ttl`** (see [DynamoDB TTL](#dynamodb-ttl)), a **GSI** on **`sessionId`** for session revocation (see [Session GSI](#session-gsi)), and a **GSI** on **`subjectId`** for subject-wide revocation (see [Subject GSI](#subject-gsi)).
 - **AWS credentials** and permissions for `PutItem`, `GetItem`, `UpdateItem`, `Query`, and `TransactWriteItems` on that table (and the configured `endpoint` if used).
 
 ## License
