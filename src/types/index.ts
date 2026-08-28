@@ -7,7 +7,8 @@ export type EpochSec = number;
  * Token lifetime (`ttlDays`) drives both logical expiration (`expiresAt`) and the
  * DynamoDB TTL attribute (`ttl`) written on Put / Transact. Session revocation options
  * (`sessionIdIndexName`, `revokeSessionOnReuse`) require a GSI whose partition key is
- * `sessionId`.
+ * `sessionId`. Subject-wide revocation (`subjectIdIndexName`, {@link RefreshTokenStore.revokeSubject})
+ * requires a GSI whose partition key is `subjectId`.
  */
 export type StoreOptions = {
   /**
@@ -40,6 +41,14 @@ export type StoreOptions = {
    * @defaultValue `'sessionId-index'`
    */
   sessionIdIndexName?: string;
+
+  /**
+   * DynamoDB GSI name whose partition key attribute is `subjectId` (String).
+   * Required for {@link RefreshTokenStore.revokeSubject} (e.g. logout all devices, password change).
+   * `KEYS_ONLY` projection is sufficient.
+   * @defaultValue `'subjectId-index'`
+   */
+  subjectIdIndexName?: string;
 
   /**
    * When true, {@link RefreshTokenStore.rotate} calls {@link RefreshTokenStore.revokeSession}
@@ -116,6 +125,20 @@ export type RevokeSessionResult = {
   revokedCount: number;
 };
 
+/** Parameters for {@link RefreshTokenStore.revokeSubject}. */
+export type RevokeSubjectParams = {
+  /** Subject (user) whose refresh token rows should all be revoked across every session. */
+  subjectId: string;
+  /** Clock override for tests; defaults to `new Date()`. */
+  now?: Date;
+};
+
+/** Result of {@link RefreshTokenStore.revokeSubject}. */
+export type RevokeSubjectResult = {
+  /** Number of token rows successfully updated with `revokedAt` in this call. */
+  revokedCount: number;
+};
+
 /**
  * DynamoDB item shape for a stored refresh token (hash-keyed by `pk`).
  *
@@ -125,7 +148,7 @@ export type RevokeSessionResult = {
 export type TokenRecord = {
   /** Partition key: prefix + SHA-256 hex of the plaintext token. */
   pk: string;
-  /** Subject (user) identifier; also used when cascading session revoke on reuse. */
+  /** Subject (user) identifier; partition key of the subject GSI used by {@link RefreshTokenStore.revokeSubject}. */
   subjectId: string;
   /**
    * Session identifier. Partition key of the session GSI used by
@@ -197,4 +220,14 @@ export interface RefreshTokenStore {
    * @returns Count of rows updated with `revokedAt`.
    */
   revokeSession(params: RevokeSessionParams): Promise<RevokeSessionResult>;
+
+  /**
+   * Sets `revokedAt` on every refresh token row for the given subject (logout all devices, password change, account suspension).
+   *
+   * Requires a DynamoDB GSI whose partition key is `subjectId` (see {@link StoreOptions.subjectIdIndexName}).
+   *
+   * @param params - Subject id and optional clock.
+   * @returns Count of rows updated with `revokedAt`.
+   */
+  revokeSubject(params: RevokeSubjectParams): Promise<RevokeSubjectResult>;
 }

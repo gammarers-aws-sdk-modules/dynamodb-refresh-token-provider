@@ -16,6 +16,8 @@ import type {
   RevokeParams,
   RevokeSessionParams,
   RevokeSessionResult,
+  RevokeSubjectParams,
+  RevokeSubjectResult,
   IssueResult,
   RotateResult,
 } from '../types/index';
@@ -32,6 +34,8 @@ export {
   RevokeParams,
   RevokeSessionParams,
   RevokeSessionResult,
+  RevokeSubjectParams,
+  RevokeSubjectResult,
   IssueResult,
   RotateResult,
 };
@@ -41,6 +45,9 @@ const DEFAULT_PRIMARY_KEY_PREFIX = 'rt#';
 
 /** Default GSI name for querying token rows by `sessionId`. */
 const DEFAULT_SESSION_ID_INDEX_NAME = 'sessionId-index';
+
+/** Default GSI name for querying token rows by `subjectId`. */
+const DEFAULT_SUBJECT_ID_INDEX_NAME = 'subjectId-index';
 
 /**
  * {@link RefreshTokenStore} implementation backed by a single DynamoDB table.
@@ -262,11 +269,70 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * @returns Count of rows updated with `revokedAt` in this call.
    */
   public revokeSession = async (params: RevokeSessionParams): Promise<RevokeSessionResult> => {
-    const ddb = this.getddb();
-
     const now = params.now ?? new Date();
     const nowSec = epochsec(now);
     const indexName = this.options?.sessionIdIndexName ?? DEFAULT_SESSION_ID_INDEX_NAME;
+
+    const revokedCount = await this.revokeTokenRowsByIndexQuery({
+      indexName,
+      keyConditionExpression: 'sessionId = :sessionId',
+      queryExpressionAttributeValues: {
+        ':sessionId': params.sessionId,
+      },
+      nowSec,
+      updateConditionExpression: params.subjectId
+        ? 'attribute_exists(pk) AND subjectId = :subjectId'
+        : 'attribute_exists(pk)',
+      updateExpressionAttributeValues: params.subjectId
+        ? { ':subjectId': params.subjectId }
+        : undefined,
+    });
+
+    return { revokedCount };
+  };
+
+  /**
+   * Sets `revokedAt` on every refresh token row for the given `subjectId` across all sessions.
+   *
+   * Queries the subject GSI (partition key `subjectId`; `KEYS_ONLY` is enough), then updates each
+   * base-table item. Missing items are skipped (idempotent). Paginate with `LastEvaluatedKey`.
+   *
+   * @param params - Subject id and optional clock.
+   * @returns Count of rows updated with `revokedAt` in this call.
+   */
+  public revokeSubject = async (params: RevokeSubjectParams): Promise<RevokeSubjectResult> => {
+    const now = params.now ?? new Date();
+    const nowSec = epochsec(now);
+    const indexName = this.options?.subjectIdIndexName ?? DEFAULT_SUBJECT_ID_INDEX_NAME;
+
+    const revokedCount = await this.revokeTokenRowsByIndexQuery({
+      indexName,
+      keyConditionExpression: 'subjectId = :subjectId',
+      queryExpressionAttributeValues: {
+        ':subjectId': params.subjectId,
+      },
+      nowSec,
+      updateConditionExpression: 'attribute_exists(pk)',
+    });
+
+    return { revokedCount };
+  };
+
+  /**
+   * Queries a GSI and sets `revokedAt` on each matching base-table row.
+   *
+   * @param params - GSI query parameters and per-row update conditions.
+   * @returns Count of rows updated with `revokedAt` in this call.
+   */
+  private revokeTokenRowsByIndexQuery = async (params: {
+    indexName: string;
+    keyConditionExpression: string;
+    queryExpressionAttributeValues: Record<string, string>;
+    nowSec: number;
+    updateConditionExpression: string;
+    updateExpressionAttributeValues?: Record<string, string>;
+  }): Promise<number> => {
+    const ddb = this.getddb();
 
     let revokedCount = 0;
     let exclusiveStartKey: Record<string, unknown> | undefined;
@@ -278,11 +344,9 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
       const res = await ddb.send(
         new QueryCommand({
           TableName: this.tableName,
-          IndexName: indexName,
-          KeyConditionExpression: 'sessionId = :sessionId',
-          ExpressionAttributeValues: {
-            ':sessionId': params.sessionId,
-          },
+          IndexName: params.indexName,
+          KeyConditionExpression: params.keyConditionExpression,
+          ExpressionAttributeValues: params.queryExpressionAttributeValues,
           ProjectionExpression: 'pk',
           ExclusiveStartKey: exclusiveStartKey,
         }),
@@ -296,13 +360,9 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
         }
 
         const expressionAttributeValues: Record<string, string | number> = {
-          ':now': nowSec,
+          ':now': params.nowSec,
+          ...params.updateExpressionAttributeValues,
         };
-        let conditionExpression = 'attribute_exists(pk)';
-        if (params.subjectId) {
-          conditionExpression = 'attribute_exists(pk) AND subjectId = :subjectId';
-          expressionAttributeValues[':subjectId'] = params.subjectId;
-        }
 
         try {
           await ddb.send(
@@ -310,7 +370,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
               TableName: this.tableName,
               Key: { pk },
               UpdateExpression: 'SET revokedAt = :now',
-              ConditionExpression: conditionExpression,
+              ConditionExpression: params.updateConditionExpression,
               ExpressionAttributeValues: expressionAttributeValues,
             }),
           );
@@ -326,7 +386,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
       exclusiveStartKey = res.LastEvaluatedKey as Record<string, unknown> | undefined;
     } while (shouldContinuePaging());
 
-    return { revokedCount };
+    return revokedCount;
   };
 
   /**
