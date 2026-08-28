@@ -10,6 +10,7 @@ import {
 import type {
   RefreshTokenStore,
   StoreOptions,
+  DocumentClientTranslateConfig,
   TokenRecord,
   IssueParams,
   RotateParams,
@@ -28,6 +29,7 @@ import { epochsec } from '../utils/time';
 export {
   RefreshTokenStore,
   StoreOptions,
+  DocumentClientTranslateConfig,
   TokenRecord,
   IssueParams,
   RotateParams,
@@ -49,6 +51,12 @@ const DEFAULT_SESSION_ID_INDEX_NAME = 'sessionId-index';
 /** Default GSI name for querying token rows by `subjectId`. */
 const DEFAULT_SUBJECT_ID_INDEX_NAME = 'subjectId-index';
 
+/** Default random byte length for generated refresh tokens (32 → 256-bit). */
+const DEFAULT_TOKEN_BYTES = 32;
+
+/** Default token lifetime in days when neither ttlSeconds nor ttlDays is set. */
+const DEFAULT_TTL_DAYS = 60;
+
 /**
  * {@link RefreshTokenStore} implementation backed by a single DynamoDB table.
  *
@@ -62,8 +70,8 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   /** Lazily initialized and cached document client. */
   private ddb: DynamoDBDocumentClient | null = null;
 
-  /** Random byte length for generated refresh tokens (default 32 → 256-bit). */
-  private readonly tokenBytes = 32;
+  /** Random byte length for generated refresh tokens. */
+  private readonly tokenBytes: number;
 
   /**
    * @param tableName - DynamoDB table name for refresh token items.
@@ -74,7 +82,10 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
     private readonly tableName: string,
     private readonly region: string,
     private readonly options?: StoreOptions,
-  ) {}
+  ) {
+    this.tokenBytes = this.resolveTokenBytes(this.options?.tokenBytes);
+    this.validateTtlOptions(this.options);
+  }
 
   /**
    * Inserts a new token record with `expiresAt` and matching `ttl`. Fails the put if `pk` already exists.
@@ -429,7 +440,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
           return `https://dynamodb.${this.region}.amazonaws.com`;
         })(),
       });
-      this.ddb = DynamoDBDocumentClient.from(client);
+      this.ddb = DynamoDBDocumentClient.from(client, this.options?.translateConfig);
     }
     return this.ddb;
   };
@@ -473,13 +484,47 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   };
 
   /**
-   * Computes logical expiration (`expiresAt` / `ttl`) as `nowSec` plus {@link StoreOptions.ttlDays}.
+   * Computes logical expiration (`expiresAt` / `ttl`) as `nowSec` plus configured lifetime.
    *
    * @param nowSec - Current time as Unix seconds.
-   * @returns Expiration timestamp in Unix seconds (default lifetime: 60 days).
+   * @returns Expiration timestamp in Unix seconds.
    */
   private makeExpiresAt = (nowSec: number): number => {
-    return nowSec + (this.options?.ttlDays ?? 60) * 24 * 60 * 60;
+    const ttlSeconds = this.options?.ttlSeconds;
+    if (ttlSeconds !== undefined) {
+      return nowSec + ttlSeconds;
+    }
+    return nowSec + (this.options?.ttlDays ?? DEFAULT_TTL_DAYS) * 24 * 60 * 60;
+  };
+
+  /**
+   * Resolves and validates {@link StoreOptions.tokenBytes}.
+   *
+   * @param tokenBytes - Optional byte length from store options.
+   * @returns Positive integer byte length.
+   * @throws {RangeError} When `tokenBytes` is not a positive integer.
+   */
+  private resolveTokenBytes = (tokenBytes?: number): number => {
+    const bytes = tokenBytes ?? DEFAULT_TOKEN_BYTES;
+    if (!Number.isInteger(bytes) || bytes < 1) {
+      throw new RangeError('tokenBytes must be a positive integer');
+    }
+    return bytes;
+  };
+
+  /**
+   * Validates TTL-related store options at construction time.
+   *
+   * @param options - Store options from the constructor.
+   * @throws {RangeError} When `ttlSeconds` or `ttlDays` is not a positive number.
+   */
+  private validateTtlOptions = (options?: StoreOptions): void => {
+    if (options?.ttlSeconds !== undefined && options.ttlSeconds <= 0) {
+      throw new RangeError('ttlSeconds must be a positive number');
+    }
+    if (options?.ttlDays !== undefined && options.ttlDays <= 0) {
+      throw new RangeError('ttlDays must be a positive number');
+    }
   };
 
   /**

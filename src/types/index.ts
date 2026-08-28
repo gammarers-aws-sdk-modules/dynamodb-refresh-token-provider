@@ -1,21 +1,51 @@
+import type { marshallOptions, unmarshallOptions } from '@aws-sdk/lib-dynamodb';
+
 /** Unix timestamp in whole seconds. */
 export type EpochSec = number;
 
 /**
+ * Pass-through to {@link DynamoDBDocumentClient.from} `translateConfig` (marshall / unmarshall options).
+ */
+export type DocumentClientTranslateConfig = {
+  /** Options for marshalling JavaScript values to DynamoDB attribute values. */
+  marshallOptions?: marshallOptions;
+  /** Options for unmarshalling DynamoDB attribute values to JavaScript values. */
+  unmarshallOptions?: unmarshallOptions;
+};
+
+/**
  * Configuration for the DynamoDB refresh token provider constructor.
  *
- * Token lifetime (`ttlDays`) drives both logical expiration (`expiresAt`) and the
- * DynamoDB TTL attribute (`ttl`) written on Put / Transact. Session revocation options
- * (`sessionIdIndexName`, `revokeSessionOnReuse`) require a GSI whose partition key is
- * `sessionId`. Subject-wide revocation (`subjectIdIndexName`, {@link RefreshTokenStore.revokeSubject})
- * requires a GSI whose partition key is `subjectId`.
+ * Token lifetime (`ttlDays` or `ttlSeconds`) drives both logical expiration (`expiresAt`) and the
+ * DynamoDB TTL attribute (`ttl`) written on Put / Transact. When both are set, `ttlSeconds` takes
+ * precedence. Session revocation options (`sessionIdIndexName`, `revokeSessionOnReuse`) require a
+ * GSI whose partition key is `sessionId`. Subject-wide revocation (`subjectIdIndexName`,
+ * {@link RefreshTokenStore.revokeSubject}) requires a GSI whose partition key is `subjectId`.
  */
 export type StoreOptions = {
   /**
    * Refresh token lifetime in days (added to `now` when computing `expiresAt` / `ttl`).
+   * Ignored when {@link StoreOptions.ttlSeconds} is set.
    * @defaultValue 60
    */
   ttlDays?: number;
+
+  /**
+   * Refresh token lifetime in seconds (added to `now` when computing `expiresAt` / `ttl`).
+   * Takes precedence over {@link StoreOptions.ttlDays} when both are set.
+   */
+  ttlSeconds?: number;
+
+  /**
+   * Number of random bytes used when generating opaque refresh tokens.
+   * @defaultValue 32
+   */
+  tokenBytes?: number;
+
+  /**
+   * Pass-through to {@link DynamoDBDocumentClient.from} `translateConfig` (e.g. `removeUndefinedValues`).
+   */
+  translateConfig?: DocumentClientTranslateConfig;
 
   /**
    * Partition key prefix for DynamoDB items; full `pk` is `prefix` + SHA-256 hex of the token.

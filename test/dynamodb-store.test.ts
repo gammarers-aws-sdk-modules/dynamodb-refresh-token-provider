@@ -85,6 +85,32 @@ describe('DynamodbRefreshTokenProvider', () => {
       });
       expect((cmd.input.Item as { pk: string }).pk.startsWith('custom#')).toBe(true);
     });
+
+    it('should respect ttlSeconds over ttlDays', async () => {
+      mockSend.mockResolvedValueOnce({});
+
+      const store = new DynamodbRefreshTokenProvider('t', 'eu-west-1', {
+        ttlDays: 7,
+        ttlSeconds: 3600,
+      });
+      await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
+
+      const cmd = mockSend.mock.calls[0][0] as PutCommand;
+      expect(cmd.input.Item).toMatchObject({
+        expiresAt: nowSec + 3600,
+        ttl: nowSec + 3600,
+      });
+    });
+
+    it('should generate tokens with custom tokenBytes length', async () => {
+      mockSend.mockResolvedValueOnce({});
+
+      const tokenBytes = 16;
+      const store = new DynamodbRefreshTokenProvider('t', 'eu-west-1', { tokenBytes });
+      const result = await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
+
+      expect(result.refreshToken.length).toBe(Math.ceil(tokenBytes * 8 / 6));
+    });
   });
 
   describe('rotate', () => {
@@ -579,6 +605,35 @@ describe('DynamodbRefreshTokenProvider', () => {
   });
 
   describe('options', () => {
+    it('should throw RangeError for invalid tokenBytes', () => {
+      expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { tokenBytes: 0 }))
+        .toThrow(RangeError);
+      expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { tokenBytes: 1.5 }))
+        .toThrow(RangeError);
+    });
+
+    it('should throw RangeError for invalid ttlSeconds or ttlDays', () => {
+      expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { ttlSeconds: 0 }))
+        .toThrow(RangeError);
+      expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { ttlDays: -1 }))
+        .toThrow(RangeError);
+    });
+
+    it('should pass translateConfig to DynamoDBDocumentClient.from', async () => {
+      mockSend.mockResolvedValueOnce({});
+
+      const translateConfig = {
+        marshallOptions: { removeUndefinedValues: true },
+      };
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { translateConfig });
+      await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
+
+      expect(DynamoDBDocumentClient.from).toHaveBeenCalledWith(
+        expect.anything(),
+        translateConfig,
+      );
+    });
+
     it('should use custom endpoint when constructing the DynamoDB client', async () => {
       mockSend.mockResolvedValueOnce({});
 

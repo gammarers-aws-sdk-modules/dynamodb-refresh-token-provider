@@ -15,6 +15,7 @@ export type {
   RevokeSessionResult,
   RevokeSubjectParams,
   RevokeSubjectResult,
+  DocumentClientTranslateConfig,
   StoreOptions,
   TokenRecord,
   EpochSec,
