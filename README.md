@@ -43,7 +43,10 @@ import {
 
 const store = new DynamodbRefreshTokenProvider('your-refresh-token-table', 'us-east-1', {
   ttlDays: 60,
+  // ttlSeconds: 3600, // alternative to ttlDays; takes precedence when both are set
+  // tokenBytes: 32,
   pkPrefix: 'rt#',
+  // translateConfig: { marshallOptions: { removeUndefinedValues: true } },
   // Optional: revoke every token in the session when reuse is detected (OAuth 2.0 BCP)
   // revokeSessionOnReuse: true,
   // sessionIdIndexName: 'sessionId-index',
@@ -176,7 +179,10 @@ Constructor: `new DynamodbRefreshTokenProvider(tableName, region, options?)`.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `ttlDays` | `number` | `60` | Token lifetime in days; added to `now` when computing `expiresAt` and `ttl` (Unix seconds). |
+| `ttlDays` | `number` | `60` | Token lifetime in days; added to `now` when computing `expiresAt` and `ttl` (Unix seconds). Ignored when `ttlSeconds` is set. |
+| `ttlSeconds` | `number` | (none) | Token lifetime in seconds; takes precedence over `ttlDays` when both are set. |
+| `tokenBytes` | `number` | `32` | Random byte length for generated refresh tokens (e.g. `32` → 256-bit). |
+| `translateConfig` | `DocumentClientTranslateConfig` | (none) | Pass-through to `DynamoDBDocumentClient.from` (e.g. `marshallOptions.removeUndefinedValues`). |
 | `pkPrefix` | `string` | `'rt#'` | Partition key prefix; full `pk` is `prefix` + SHA-256 hex of the plaintext token. |
 | `consistentRead` | `boolean` | `true` | Use strongly consistent reads on `GetItem` when loading a token row. |
 | `endpoint` | `string` | (none) | Custom DynamoDB API endpoint (e.g. LocalStack or DynamoDB Local). |
