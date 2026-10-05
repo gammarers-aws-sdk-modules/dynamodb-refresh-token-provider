@@ -274,7 +274,8 @@ export interface RefreshTokenStore {
   revokeSession(params: RevokeSessionParams): Promise<RevokeSessionResult>;
 
   /**
-   * Sets `revokedAt` on every refresh token row for the given subject (logout all devices, password change, account suspension).
+   * Sets `revokedAt` on every refresh token row for the given subject
+   * (logout all devices, password change, account suspension).
    *
    * Requires a DynamoDB GSI whose partition key is `subjectId` (see {@link StoreOptions.subjectIdIndexName}).
    *
