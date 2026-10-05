@@ -1,4 +1,4 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, type DynamoDBClientConfig } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 
 import {
@@ -63,8 +63,9 @@ const DEFAULT_TTL_DAYS = 60;
  * Items use partition key `pk`, logical expiration `expiresAt`, and DynamoDB TTL attribute `ttl`
  * (Unix seconds). Enable table TTL on attribute `ttl` so expired and rotated rows are removed
  * asynchronously. Session-wide revocation requires a GSI whose partition key is `sessionId`
- * (see {@link StoreOptions.sessionIdIndexName}). This class owns the DynamoDB client; callers
- * supply `tableName`, `region`, and optional {@link StoreOptions}.
+ * (see {@link StoreOptions.sessionIdIndexName}). Callers supply `tableName`, `region`, and optional
+ * {@link StoreOptions}. A document client is created lazily from `region` unless
+ * {@link StoreOptions.documentClient} is provided.
  */
 export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   /** Lazily initialized and cached document client. */
@@ -75,8 +76,11 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
 
   /**
    * @param tableName - DynamoDB table name for refresh token items.
-   * @param region - AWS region for the DynamoDB client.
-   * @param options - Token lifetime, PK prefix, GSI name, reuse revocation, or custom endpoint.
+   * @param region - AWS region used when this class constructs the DynamoDB client.
+   *   Unused for client construction when {@link StoreOptions.documentClient} is set.
+   * @param options - Token lifetime, PK prefix, GSI names, reuse revocation, client injection, or custom endpoint.
+   * @throws {RangeError} When `tokenBytes`, `ttlSeconds`, or `ttlDays` is invalid.
+   * @throws {TypeError} When `documentClient` and `clientConfig` are both set.
    */
   constructor(
     private readonly tableName: string,
@@ -85,6 +89,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   ) {
     this.tokenBytes = this.resolveTokenBytes(this.options?.tokenBytes);
     this.validateTtlOptions(this.options);
+    this.validateClientOptions(this.options);
   }
 
   /**
@@ -427,22 +432,55 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   /**
    * Returns the cached {@link DynamoDBDocumentClient}, creating it on first use.
    *
-   * @returns Document client configured for `region` and optional `endpoint`.
+   * {@link StoreOptions.documentClient} is used as-is. Otherwise a client is built from
+   * {@link DynamodbRefreshTokenProvider.resolveClientConfig}.
+   *
+   * @returns Document client used for store commands.
    */
   private getddb = (): DynamoDBDocumentClient => {
     if (!this.ddb) {
-      const client = new DynamoDBClient({
-        region: this.region,
-        endpoint: (() => {
-          if (this.options?.endpoint) {
-            return this.options.endpoint;
-          }
-          return `https://dynamodb.${this.region}.amazonaws.com`;
-        })(),
-      });
-      this.ddb = DynamoDBDocumentClient.from(client, this.options?.translateConfig);
+      this.ddb = this.options?.documentClient ?? this.createDocumentClient();
     }
     return this.ddb;
+  };
+
+  /**
+   * Constructs a document client from {@link StoreOptions.clientConfig} and `translateConfig`.
+   *
+   * @returns Document client owned by this provider.
+   */
+  private createDocumentClient = (): DynamoDBDocumentClient => {
+    const client = new DynamoDBClient(this.resolveClientConfig());
+    return DynamoDBDocumentClient.from(client, this.options?.translateConfig);
+  };
+
+  /**
+   * Builds the config for an internally constructed `DynamoDBClient`.
+   *
+   * Starts from the constructor `region` and {@link StoreOptions.endpoint} (or the regional
+   * DynamoDB endpoint). {@link StoreOptions.clientConfig} is applied last so its fields win.
+   *
+   * @returns Config passed to `new DynamoDBClient`.
+   */
+  private resolveClientConfig = (): DynamoDBClientConfig => {
+    const endpoint = this.options?.endpoint ?? `https://dynamodb.${this.region}.amazonaws.com`;
+    return {
+      region: this.region,
+      endpoint,
+      ...this.options?.clientConfig,
+    };
+  };
+
+  /**
+   * Rejects combining an injected document client with client construction config.
+   *
+   * @param options - Store options from the constructor.
+   * @throws {TypeError} When `documentClient` and `clientConfig` are both set.
+   */
+  private validateClientOptions = (options?: StoreOptions): void => {
+    if (options?.documentClient !== undefined && options.clientConfig !== undefined) {
+      throw new TypeError('documentClient and clientConfig are mutually exclusive');
+    }
   };
 
   /**

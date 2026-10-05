@@ -17,6 +17,7 @@ TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** 
 - **Subject revocation** — `revokeSubject({ subjectId })` revokes every token for a user across all sessions via a `subjectId` GSI (logout all devices, password change, account suspension).
 - **Structured errors** — `RefreshTokenError`, `RefreshTokenInvalidError`, `RefreshTokenExpiredError`, `RefreshTokenRevokedError`, `RefreshTokenReusedError` (with optional `subjectId` / `sessionId`), and `RefreshTokenRotateFailedError` for `instanceof` handling.
 - **Utilities** — `sha256hex` and `randomtoken` for hashing and token generation aligned with the store.
+- **Injectable DynamoDB client** — pass an existing `DynamoDBDocumentClient`, or a `DynamoDBClientConfig` for credentials, retries, and request handlers.
 
 ## Installation
 
@@ -47,6 +48,8 @@ const store = new DynamodbRefreshTokenProvider('your-refresh-token-table', 'us-e
   // tokenBytes: 32,
   pkPrefix: 'rt#',
   // translateConfig: { marshallOptions: { removeUndefinedValues: true } },
+  // documentClient: existingDocumentClient,
+  // clientConfig: { maxAttempts: 3 },
   // Optional: revoke every token in the session when reuse is detected (OAuth 2.0 BCP)
   // revokeSessionOnReuse: true,
   // sessionIdIndexName: 'sessionId-index',
@@ -93,6 +96,30 @@ await store.revokeSession({ sessionId: 'session-456', subjectId: 'user-123' });
 
 // Revoke all tokens for a subject across every session (requires subjectId GSI)
 await store.revokeSubject({ subjectId: 'user-123' });
+```
+
+### DynamoDB client
+
+By default the provider builds a `DynamoDBClient` from the constructor `region` and optional `endpoint`, then wraps it with `DynamoDBDocumentClient.from`. Pass `documentClient` to reuse an existing document client, including one created from an X-Ray-wrapped client. The constructor `region` is not used to build a client when `documentClient` is set. Pass `clientConfig` to supply credentials, retries, or a request handler to the client this provider constructs. Do not set `documentClient` and `clientConfig` together.
+
+```typescript
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { DynamodbRefreshTokenProvider } from 'dynamodb-refresh-token-provider';
+
+const documentClient = DynamoDBDocumentClient.from(
+  new DynamoDBClient({ region: 'us-east-1', maxAttempts: 3 }),
+);
+
+const store = new DynamodbRefreshTokenProvider('your-refresh-token-table', 'us-east-1', {
+  documentClient,
+});
+
+const storeWithConfig = new DynamodbRefreshTokenProvider('your-refresh-token-table', 'us-east-1', {
+  clientConfig: {
+    maxAttempts: 3,
+  },
+});
 ```
 
 ### DynamoDB TTL
@@ -182,10 +209,12 @@ Constructor: `new DynamodbRefreshTokenProvider(tableName, region, options?)`.
 | `ttlDays` | `number` | `60` | Token lifetime in days; added to `now` when computing `expiresAt` and `ttl` (Unix seconds). Ignored when `ttlSeconds` is set. |
 | `ttlSeconds` | `number` | (none) | Token lifetime in seconds; takes precedence over `ttlDays` when both are set. |
 | `tokenBytes` | `number` | `32` | Random byte length for generated refresh tokens (e.g. `32` → 256-bit). |
-| `translateConfig` | `DocumentClientTranslateConfig` | (none) | Pass-through to `DynamoDBDocumentClient.from` (e.g. `marshallOptions.removeUndefinedValues`). |
+| `translateConfig` | `DocumentClientTranslateConfig` | (none) | Pass-through to `DynamoDBDocumentClient.from` (e.g. `marshallOptions.removeUndefinedValues`). Ignored when `documentClient` is set. |
 | `pkPrefix` | `string` | `'rt#'` | Partition key prefix; full `pk` is `prefix` + SHA-256 hex of the plaintext token. |
 | `consistentRead` | `boolean` | `true` | Use strongly consistent reads on `GetItem` when loading a token row. |
-| `endpoint` | `string` | (none) | Custom DynamoDB API endpoint (e.g. LocalStack or DynamoDB Local). |
+| `endpoint` | `string` | (none) | Custom DynamoDB API endpoint (e.g. LocalStack or DynamoDB Local). Ignored when `documentClient` is set. Overridden by `clientConfig.endpoint` when both are set. |
+| `documentClient` | `DynamoDBDocumentClient` | (none) | Existing document client. When set, the provider does not construct a client. `clientConfig`, `endpoint`, and `translateConfig` are not applied. Mutually exclusive with `clientConfig`. |
+| `clientConfig` | `DynamoDBClientConfig` | (none) | Passed to `new DynamoDBClient` after `region` and `endpoint`. Fields here override those. Mutually exclusive with `documentClient`. |
 | `sessionIdIndexName` | `string` | `'sessionId-index'` | GSI name whose partition key is `sessionId` (required for `revokeSession`). |
 | `subjectIdIndexName` | `string` | `'subjectId-index'` | GSI name whose partition key is `subjectId` (required for `revokeSubject`). |
 | `revokeSessionOnReuse` | `boolean` | `false` | When true, `rotate` calls `revokeSession` for the token’s session before throwing `RefreshTokenReusedError`. |

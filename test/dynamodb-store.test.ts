@@ -1,3 +1,4 @@
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
   GetCommand,
@@ -15,6 +16,15 @@ import {
 } from '../src';
 
 const mockSend = jest.fn();
+const mockDynamoDBClient = DynamoDBClient as unknown as jest.Mock;
+
+jest.mock('@aws-sdk/client-dynamodb', () => {
+  const actual = jest.requireActual('@aws-sdk/client-dynamodb') as typeof import('@aws-sdk/client-dynamodb');
+  return {
+    ...actual,
+    DynamoDBClient: jest.fn().mockImplementation(() => ({})),
+  };
+});
 
 jest.mock('@aws-sdk/lib-dynamodb', () => {
   const actual = jest.requireActual('@aws-sdk/lib-dynamodb') as typeof import('@aws-sdk/lib-dynamodb');
@@ -38,6 +48,7 @@ const futureExpiresAt = nowSec + defaultTtlSec + 1;
 describe('DynamodbRefreshTokenProvider', () => {
   beforeEach(() => {
     mockSend.mockReset();
+    mockDynamoDBClient.mockClear();
     (DynamoDBDocumentClient.from as jest.Mock).mockClear();
   });
 
@@ -642,6 +653,10 @@ describe('DynamodbRefreshTokenProvider', () => {
       });
       await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
 
+      expect(mockDynamoDBClient).toHaveBeenCalledWith({
+        region: 'us-east-1',
+        endpoint: 'http://localhost:8000',
+      });
       expect(DynamoDBDocumentClient.from).toHaveBeenCalled();
       expect(mockSend).toHaveBeenCalledTimes(1);
     });
@@ -653,8 +668,81 @@ describe('DynamodbRefreshTokenProvider', () => {
       await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
       await store.issue({ subjectId: 'c', sessionId: 'd', now: fixedNow });
 
+      expect(mockDynamoDBClient).toHaveBeenCalledTimes(1);
+      expect(mockDynamoDBClient).toHaveBeenCalledWith({
+        region: 'us-east-1',
+        endpoint: 'https://dynamodb.us-east-1.amazonaws.com',
+      });
       expect(DynamoDBDocumentClient.from).toHaveBeenCalledTimes(1);
       expect(mockSend).toHaveBeenCalledTimes(2);
+    });
+
+    it('should send commands through an injected document client', async () => {
+      const send = jest.fn().mockResolvedValue({});
+      // Test double: the store only calls `send` on an injected client.
+      const documentClient = { send } as unknown as DynamoDBDocumentClient;
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { documentClient });
+      await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
+      await store.issue({ subjectId: 'c', sessionId: 'd', now: fixedNow });
+
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(mockDynamoDBClient).not.toHaveBeenCalled();
+      expect(DynamoDBDocumentClient.from).not.toHaveBeenCalled();
+    });
+
+    it('should pass clientConfig to DynamoDBClient with region and endpoint as the base', async () => {
+      mockSend.mockResolvedValueOnce({});
+
+      const credentials = {
+        accessKeyId: 'access-key',
+        secretAccessKey: 'secret-key',
+      };
+      const store = new DynamodbRefreshTokenProvider('tbl', 'ap-northeast-1', {
+        endpoint: 'http://localhost:8000',
+        clientConfig: {
+          region: 'eu-west-1',
+          credentials,
+          maxAttempts: 5,
+        },
+      });
+      await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
+
+      expect(mockDynamoDBClient).toHaveBeenCalledWith({
+        region: 'eu-west-1',
+        endpoint: 'http://localhost:8000',
+        credentials,
+        maxAttempts: 5,
+      });
+      expect(DynamoDBDocumentClient.from).toHaveBeenCalledTimes(1);
+    });
+
+    it('should let clientConfig.endpoint override the endpoint option', async () => {
+      mockSend.mockResolvedValueOnce({});
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+        endpoint: 'http://localhost:8000',
+        clientConfig: {
+          endpoint: 'http://localhost:4566',
+        },
+      });
+      await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
+
+      expect(mockDynamoDBClient).toHaveBeenCalledWith({
+        region: 'us-east-1',
+        endpoint: 'http://localhost:4566',
+      });
+    });
+
+    it('should throw TypeError when documentClient and clientConfig are both set', () => {
+      const documentClient = { send: jest.fn() } as unknown as DynamoDBDocumentClient;
+
+      expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+        documentClient,
+        clientConfig: { maxAttempts: 2 },
+      })).toThrow(new TypeError('documentClient and clientConfig are mutually exclusive'));
+      expect(mockDynamoDBClient).not.toHaveBeenCalled();
+      expect(DynamoDBDocumentClient.from).not.toHaveBeenCalled();
     });
 
     it('should default now to current Date when omitted', async () => {
