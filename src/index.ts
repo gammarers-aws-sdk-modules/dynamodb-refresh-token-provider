@@ -19,27 +19,29 @@ export type {
   StoreOptions,
   TokenRecord,
   EpochSec,
-} from './types/index';
+} from './core/types';
 
 /**
  * DynamoDB-backed {@link RefreshTokenStore} with rotation reuse detection and optional
  * session-wide revocation (`revokeSession` / `revokeSessionOnReuse`) and subject-wide
  * revocation (`revokeSubject`).
  */
-export { DynamodbRefreshTokenProvider } from './stores/dynamodb';
+export { DynamodbRefreshTokenProvider } from './dynamodb-refresh-token-provider';
 
 /**
  * Structured errors for `instanceof` handling in auth flows.
- * {@link RefreshTokenReusedError} may carry `subjectId` / `sessionId` for session revoke.
+ * Check a concrete subclass before {@link DynamodbRefreshTokenProviderError}.
+ * {@link DynamodbRefreshTokenProviderReusedError} may carry `subjectId` / `sessionId` for session revoke.
  */
 export {
-  RefreshTokenError,
-  RefreshTokenExpiredError,
-  RefreshTokenInvalidError,
-  RefreshTokenReusedError,
-  RefreshTokenRevokedError,
-  RefreshTokenRotateFailedError,
-} from './stores/refresh-token-errors';
+  DynamodbRefreshTokenProviderError,
+  DynamodbRefreshTokenProviderValidateError,
+  DynamodbRefreshTokenProviderExpiredError,
+  DynamodbRefreshTokenProviderInvalidError,
+  DynamodbRefreshTokenProviderReusedError,
+  DynamodbRefreshTokenProviderRevokedError,
+  DynamodbRefreshTokenProviderRotateFailedError,
+} from './core/errors';
 
 /** SHA-256 hex hashing and cryptographically secure token generation. */
-export { sha256hex, randomtoken } from './utils/hash';
+export { sha256Hex, randomToken } from './core/hash';

@@ -1,4 +1,5 @@
-import type { marshallOptions, unmarshallOptions } from '@aws-sdk/lib-dynamodb';
+import type { DynamoDBClientConfig } from '@aws-sdk/client-dynamodb';
+import type { DynamoDBDocumentClient, marshallOptions, unmarshallOptions } from '@aws-sdk/lib-dynamodb';
 
 /** Unix timestamp in whole seconds. */
 export type EpochSec = number;
@@ -21,6 +22,8 @@ export type DocumentClientTranslateConfig = {
  * precedence. Session revocation options (`sessionIdIndexName`, `revokeSessionOnReuse`) require a
  * GSI whose partition key is `sessionId`. Subject-wide revocation (`subjectIdIndexName`,
  * {@link RefreshTokenStore.revokeSubject}) requires a GSI whose partition key is `subjectId`.
+ * Pass `documentClient` to reuse an existing document client, or `clientConfig` to configure the
+ * client this provider constructs. Those two options are mutually exclusive.
  */
 export type StoreOptions = {
   /**
@@ -44,6 +47,7 @@ export type StoreOptions = {
 
   /**
    * Pass-through to {@link DynamoDBDocumentClient.from} `translateConfig` (e.g. `removeUndefinedValues`).
+   * Ignored when {@link StoreOptions.documentClient} is set.
    */
   translateConfig?: DocumentClientTranslateConfig;
 
@@ -61,8 +65,26 @@ export type StoreOptions = {
 
   /**
    * Custom DynamoDB API endpoint (e.g. LocalStack or DynamoDB Local).
+   * Applied when this provider constructs the client. Ignored when {@link StoreOptions.documentClient} is set.
+   * Overridden by `endpoint` on {@link StoreOptions.clientConfig} when both are set.
    */
   endpoint?: string;
+
+  /**
+   * Existing document client. Commands are sent through this client.
+   * The provider does not construct `DynamoDBClient` or call `DynamoDBDocumentClient.from`.
+   * `clientConfig`, `endpoint`, and `translateConfig` are not applied, and the constructor
+   * `region` is not used to build a client. Mutually exclusive with {@link StoreOptions.clientConfig}.
+   * Use this to share a client, including one created from an X-Ray-wrapped `DynamoDBClient`.
+   */
+  documentClient?: DynamoDBDocumentClient;
+
+  /**
+   * Config for the internally constructed `DynamoDBClient` (credentials, retries, request handler, and so on).
+   * The constructor `region` and {@link StoreOptions.endpoint} are the base; fields on this object override them.
+   * Mutually exclusive with {@link StoreOptions.documentClient}.
+   */
+  clientConfig?: DynamoDBClientConfig;
 
   /**
    * DynamoDB GSI name whose partition key attribute is `sessionId` (String).
@@ -82,7 +104,7 @@ export type StoreOptions = {
 
   /**
    * When true, {@link RefreshTokenStore.rotate} calls {@link RefreshTokenStore.revokeSession}
-   * for the token’s `sessionId` and `subjectId` before throwing {@link RefreshTokenReusedError}.
+   * for the token’s `sessionId` and `subjectId` before throwing {@link DynamodbRefreshTokenProviderReusedError}.
    * Aligns with OAuth 2.0 BCP refresh-token family revocation on reuse detection.
    * @defaultValue false
    */
@@ -221,10 +243,10 @@ export interface RefreshTokenStore {
    *
    * @param params - Current token and optional clock.
    * @returns Subject, session, new token, and new expiration.
-   * @throws {@link RefreshTokenInvalidError} When the token is invalid or no row exists.
-   * @throws {@link RefreshTokenExpiredError} When `expiresAt` is not after `now`.
-   * @throws {@link RefreshTokenRevokedError} When the row has `revokedAt` set.
-   * @throws {@link RefreshTokenReusedError} When the token was already rotated or the transaction
+   * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token is invalid or no row exists.
+   * @throws {@link DynamodbRefreshTokenProviderExpiredError} When `expiresAt` is not after `now`.
+   * @throws {@link DynamodbRefreshTokenProviderRevokedError} When the row has `revokedAt` set.
+   * @throws {@link DynamodbRefreshTokenProviderReusedError} When the token was already rotated or the transaction
    *   failed conditionally. May include `subjectId` / `sessionId` from the store row.
    */
   rotate(params: RotateParams): Promise<RotateResult>;
@@ -236,7 +258,7 @@ export interface RefreshTokenStore {
    *
    * @param params - Token to revoke and optional clock.
    * @returns `true` after a successful update or no-op when the item is absent.
-   * @throws {@link RefreshTokenInvalidError} When the token string format is invalid.
+   * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token string format is invalid.
    */
   revoke(params: RevokeParams): Promise<true>;
 
@@ -252,7 +274,8 @@ export interface RefreshTokenStore {
   revokeSession(params: RevokeSessionParams): Promise<RevokeSessionResult>;
 
   /**
-   * Sets `revokedAt` on every refresh token row for the given subject (logout all devices, password change, account suspension).
+   * Sets `revokedAt` on every refresh token row for the given subject
+   * (logout all devices, password change, account suspension).
    *
    * Requires a DynamoDB GSI whose partition key is `subjectId` (see {@link StoreOptions.subjectIdIndexName}).
    *
