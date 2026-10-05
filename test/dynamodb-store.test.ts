@@ -10,9 +10,10 @@ import {
 
 import {
   DynamodbRefreshTokenProvider,
-  RefreshTokenExpiredError,
-  RefreshTokenInvalidError,
-  RefreshTokenRevokedError,
+  DynamodbRefreshTokenProviderExpiredError,
+  DynamodbRefreshTokenProviderInvalidError,
+  DynamodbRefreshTokenProviderRevokedError,
+  DynamodbRefreshTokenProviderValidateError,
 } from '../src';
 
 const mockSend = jest.fn();
@@ -125,25 +126,25 @@ describe('DynamodbRefreshTokenProvider', () => {
   });
 
   describe('rotate', () => {
-    it('should throw RefreshTokenInvalidError for malformed token before calling DynamoDB', async () => {
+    it('should throw DynamodbRefreshTokenProviderInvalidError for malformed token before calling DynamoDB', async () => {
       const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
-      await expect(store.rotate({ refreshToken: '' })).rejects.toThrow(RefreshTokenInvalidError);
-      await expect(store.rotate({ refreshToken: 'short' })).rejects.toThrow(RefreshTokenInvalidError);
+      await expect(store.rotate({ refreshToken: '' })).rejects.toThrow(DynamodbRefreshTokenProviderInvalidError);
+      await expect(store.rotate({ refreshToken: 'short' })).rejects.toThrow(DynamodbRefreshTokenProviderInvalidError);
       expect(mockSend).not.toHaveBeenCalled();
     });
 
-    it('should throw RefreshTokenInvalidError when item is missing', async () => {
+    it('should throw DynamodbRefreshTokenProviderInvalidError when item is missing', async () => {
       mockSend.mockResolvedValueOnce({});
 
       const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
-      ).rejects.toThrow(RefreshTokenInvalidError);
+      ).rejects.toThrow(DynamodbRefreshTokenProviderInvalidError);
       expect(mockSend).toHaveBeenCalledTimes(1);
       expect(mockSend.mock.calls[0][0]).toBeInstanceOf(GetCommand);
     });
 
-    it('should throw RefreshTokenExpiredError when expiresAt is not after now', async () => {
+    it('should throw DynamodbRefreshTokenProviderExpiredError when expiresAt is not after now', async () => {
       mockSend.mockResolvedValueOnce({
         Item: {
           pk: 'rt#x',
@@ -157,10 +158,10 @@ describe('DynamodbRefreshTokenProvider', () => {
       const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
-      ).rejects.toThrow(RefreshTokenExpiredError);
+      ).rejects.toThrow(DynamodbRefreshTokenProviderExpiredError);
     });
 
-    it('should throw RefreshTokenRevokedError when revokedAt is set', async () => {
+    it('should throw DynamodbRefreshTokenProviderRevokedError when revokedAt is set', async () => {
       mockSend.mockResolvedValueOnce({
         Item: {
           pk: 'rt#x',
@@ -175,10 +176,10 @@ describe('DynamodbRefreshTokenProvider', () => {
       const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
-      ).rejects.toThrow(RefreshTokenRevokedError);
+      ).rejects.toThrow(DynamodbRefreshTokenProviderRevokedError);
     });
 
-    it('should throw RefreshTokenReusedError when rotatedAt is set', async () => {
+    it('should throw DynamodbRefreshTokenProviderReusedError when rotatedAt is set', async () => {
       mockSend.mockResolvedValueOnce({
         Item: {
           pk: 'rt#x',
@@ -194,7 +195,7 @@ describe('DynamodbRefreshTokenProvider', () => {
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toMatchObject({
-        name: 'RefreshTokenReusedError',
+        name: 'DynamodbRefreshTokenProviderReusedError',
         subjectId: 's',
         sessionId: 'sess',
       });
@@ -225,7 +226,7 @@ describe('DynamodbRefreshTokenProvider', () => {
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toMatchObject({
-        name: 'RefreshTokenReusedError',
+        name: 'DynamodbRefreshTokenProviderReusedError',
         subjectId: 'sub',
         sessionId: 'sess',
       });
@@ -271,7 +272,7 @@ describe('DynamodbRefreshTokenProvider', () => {
       expect(out.refreshTokenExpiresAt).toBe(nowSec + defaultTtlSec);
     });
 
-    it('should map TransactionCanceledException to RefreshTokenReusedError', async () => {
+    it('should map TransactionCanceledException to DynamodbRefreshTokenProviderReusedError', async () => {
       mockSend
         .mockResolvedValueOnce({
           Item: {
@@ -288,7 +289,7 @@ describe('DynamodbRefreshTokenProvider', () => {
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toMatchObject({
-        name: 'RefreshTokenReusedError',
+        name: 'DynamodbRefreshTokenProviderReusedError',
         subjectId: 'sub',
         sessionId: 'sess',
       });
@@ -315,7 +316,7 @@ describe('DynamodbRefreshTokenProvider', () => {
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toMatchObject({
-        name: 'RefreshTokenReusedError',
+        name: 'DynamodbRefreshTokenProviderReusedError',
         subjectId: 'sub',
         sessionId: 'sess',
       });
@@ -348,9 +349,9 @@ describe('DynamodbRefreshTokenProvider', () => {
   });
 
   describe('revoke', () => {
-    it('should throw RefreshTokenInvalidError for invalid token string', async () => {
+    it('should throw DynamodbRefreshTokenProviderInvalidError for invalid token string', async () => {
       const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
-      await expect(store.revoke({ refreshToken: 'x' })).rejects.toThrow(RefreshTokenInvalidError);
+      await expect(store.revoke({ refreshToken: 'x' })).rejects.toThrow(DynamodbRefreshTokenProviderInvalidError);
       expect(mockSend).not.toHaveBeenCalled();
     });
 
@@ -616,18 +617,18 @@ describe('DynamodbRefreshTokenProvider', () => {
   });
 
   describe('options', () => {
-    it('should throw RangeError for invalid tokenBytes', () => {
+    it('should throw DynamodbRefreshTokenProviderValidateError for invalid tokenBytes', () => {
       expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { tokenBytes: 0 }))
-        .toThrow(RangeError);
+        .toThrow(new DynamodbRefreshTokenProviderValidateError('tokenBytes must be a positive integer'));
       expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { tokenBytes: 1.5 }))
-        .toThrow(RangeError);
+        .toThrow(new DynamodbRefreshTokenProviderValidateError('tokenBytes must be a positive integer'));
     });
 
-    it('should throw RangeError for invalid ttlSeconds or ttlDays', () => {
+    it('should throw DynamodbRefreshTokenProviderValidateError for invalid ttlSeconds or ttlDays', () => {
       expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { ttlSeconds: 0 }))
-        .toThrow(RangeError);
+        .toThrow(new DynamodbRefreshTokenProviderValidateError('ttlSeconds must be a positive number'));
       expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { ttlDays: -1 }))
-        .toThrow(RangeError);
+        .toThrow(new DynamodbRefreshTokenProviderValidateError('ttlDays must be a positive number'));
     });
 
     it('should pass translateConfig to DynamoDBDocumentClient.from', async () => {
@@ -734,13 +735,15 @@ describe('DynamodbRefreshTokenProvider', () => {
       });
     });
 
-    it('should throw TypeError when documentClient and clientConfig are both set', () => {
+    it('should throw DynamodbRefreshTokenProviderValidateError when documentClient and clientConfig are both set', () => {
       const documentClient = { send: jest.fn() } as unknown as DynamoDBDocumentClient;
 
       expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
         documentClient,
         clientConfig: { maxAttempts: 2 },
-      })).toThrow(new TypeError('documentClient and clientConfig are mutually exclusive'));
+      })).toThrow(new DynamodbRefreshTokenProviderValidateError(
+        'documentClient and clientConfig are mutually exclusive',
+      ));
       expect(mockDynamoDBClient).not.toHaveBeenCalled();
       expect(DynamoDBDocumentClient.from).not.toHaveBeenCalled();
     });

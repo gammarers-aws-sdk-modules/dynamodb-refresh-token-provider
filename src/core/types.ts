@@ -104,7 +104,7 @@ export type StoreOptions = {
 
   /**
    * When true, {@link RefreshTokenStore.rotate} calls {@link RefreshTokenStore.revokeSession}
-   * for the token’s `sessionId` and `subjectId` before throwing {@link RefreshTokenReusedError}.
+   * for the token’s `sessionId` and `subjectId` before throwing {@link DynamodbRefreshTokenProviderReusedError}.
    * Aligns with OAuth 2.0 BCP refresh-token family revocation on reuse detection.
    * @defaultValue false
    */
@@ -243,10 +243,10 @@ export interface RefreshTokenStore {
    *
    * @param params - Current token and optional clock.
    * @returns Subject, session, new token, and new expiration.
-   * @throws {@link RefreshTokenInvalidError} When the token is invalid or no row exists.
-   * @throws {@link RefreshTokenExpiredError} When `expiresAt` is not after `now`.
-   * @throws {@link RefreshTokenRevokedError} When the row has `revokedAt` set.
-   * @throws {@link RefreshTokenReusedError} When the token was already rotated or the transaction
+   * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token is invalid or no row exists.
+   * @throws {@link DynamodbRefreshTokenProviderExpiredError} When `expiresAt` is not after `now`.
+   * @throws {@link DynamodbRefreshTokenProviderRevokedError} When the row has `revokedAt` set.
+   * @throws {@link DynamodbRefreshTokenProviderReusedError} When the token was already rotated or the transaction
    *   failed conditionally. May include `subjectId` / `sessionId` from the store row.
    */
   rotate(params: RotateParams): Promise<RotateResult>;
@@ -258,7 +258,7 @@ export interface RefreshTokenStore {
    *
    * @param params - Token to revoke and optional clock.
    * @returns `true` after a successful update or no-op when the item is absent.
-   * @throws {@link RefreshTokenInvalidError} When the token string format is invalid.
+   * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token string format is invalid.
    */
   revoke(params: RevokeParams): Promise<true>;
 

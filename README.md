@@ -15,8 +15,8 @@ TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** 
 - **Rotation safety** — marks the old row as rotated and inserts the successor in one transaction; detects reuse and conflicting updates.
 - **Session revocation (OAuth 2.0 BCP)** — `revokeSession({ sessionId })` revokes all tokens for a session via a `sessionId` GSI; optional `revokeSessionOnReuse` cascades on reuse detection.
 - **Subject revocation** — `revokeSubject({ subjectId })` revokes every token for a user across all sessions via a `subjectId` GSI (logout all devices, password change, account suspension).
-- **Structured errors** — `RefreshTokenError`, `RefreshTokenInvalidError`, `RefreshTokenExpiredError`, `RefreshTokenRevokedError`, `RefreshTokenReusedError` (with optional `subjectId` / `sessionId`), and `RefreshTokenRotateFailedError` for `instanceof` handling.
-- **Utilities** — `sha256hex` and `randomtoken` for hashing and token generation aligned with the store.
+- **Structured errors** — `DynamodbRefreshTokenProviderInvalidError`, `DynamodbRefreshTokenProviderExpiredError`, `DynamodbRefreshTokenProviderRevokedError`, `DynamodbRefreshTokenProviderReusedError` (with optional `subjectId` / `sessionId`), `DynamodbRefreshTokenProviderRotateFailedError`, and `DynamodbRefreshTokenProviderValidateError`, all extending `DynamodbRefreshTokenProviderError`. Check a subclass before the base.
+- **Utilities** — `sha256Hex` and `randomToken` for hashing and token generation aligned with the store.
 - **Injectable DynamoDB client** — pass an existing `DynamoDBDocumentClient`, or a `DynamoDBClientConfig` for credentials, retries, and request handlers.
 
 ## Installation
@@ -36,10 +36,10 @@ Create a store with your table name, AWS region, and optional `StoreOptions`. Yo
 ```typescript
 import {
   DynamodbRefreshTokenProvider,
-  RefreshTokenExpiredError,
-  RefreshTokenInvalidError,
-  RefreshTokenReusedError,
-  RefreshTokenRevokedError,
+  DynamodbRefreshTokenProviderExpiredError,
+  DynamodbRefreshTokenProviderInvalidError,
+  DynamodbRefreshTokenProviderReusedError,
+  DynamodbRefreshTokenProviderRevokedError,
 } from 'dynamodb-refresh-token-provider';
 
 const store = new DynamodbRefreshTokenProvider('your-refresh-token-table', 'us-east-1', {
@@ -69,20 +69,20 @@ try {
   const rotated = await store.rotate({ refreshToken: issued.refreshToken });
   // rotated.refreshToken, rotated.refreshTokenExpiresAt, rotated.subjectId, rotated.sessionId
 } catch (e) {
-  if (e instanceof RefreshTokenReusedError) {
+  if (e instanceof DynamodbRefreshTokenProviderReusedError) {
     // already rotated or lost a transactional race
     // e.sessionId / e.subjectId are set when the store row was loaded
     if (e.sessionId) {
       await store.revokeSession({ sessionId: e.sessionId, subjectId: e.subjectId });
     }
   }
-  if (e instanceof RefreshTokenInvalidError) {
+  if (e instanceof DynamodbRefreshTokenProviderInvalidError) {
     // unknown or malformed token
   }
-  if (e instanceof RefreshTokenExpiredError) {
+  if (e instanceof DynamodbRefreshTokenProviderExpiredError) {
     // past expiresAt
   }
-  if (e instanceof RefreshTokenRevokedError) {
+  if (e instanceof DynamodbRefreshTokenProviderRevokedError) {
     // revokedAt is set
   }
   throw e;
@@ -217,7 +217,7 @@ Constructor: `new DynamodbRefreshTokenProvider(tableName, region, options?)`.
 | `clientConfig` | `DynamoDBClientConfig` | (none) | Passed to `new DynamoDBClient` after `region` and `endpoint`. Fields here override those. Mutually exclusive with `documentClient`. |
 | `sessionIdIndexName` | `string` | `'sessionId-index'` | GSI name whose partition key is `sessionId` (required for `revokeSession`). |
 | `subjectIdIndexName` | `string` | `'subjectId-index'` | GSI name whose partition key is `subjectId` (required for `revokeSubject`). |
-| `revokeSessionOnReuse` | `boolean` | `false` | When true, `rotate` calls `revokeSession` for the token’s session before throwing `RefreshTokenReusedError`. |
+| `revokeSessionOnReuse` | `boolean` | `false` | When true, `rotate` calls `revokeSession` for the token’s session before throwing `DynamodbRefreshTokenProviderReusedError`. |
 
 `issue`, `rotate`, `revoke`, `revokeSession`, and `revokeSubject` accept an optional `now?: Date` for testing or clock injection.
 
