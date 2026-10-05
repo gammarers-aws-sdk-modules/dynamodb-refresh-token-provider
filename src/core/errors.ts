@@ -121,7 +121,8 @@ export class DynamodbRefreshTokenProviderReusedError extends DynamodbRefreshToke
 }
 
 /**
- * Thrown when rotation fails for a reason other than reuse (e.g. transient store failure).
+ * Rotation failed for a reason other than reuse (for example a transient store failure).
+ * {@link DynamodbRefreshTokenProvider.rotate} does not throw this class; those failures propagate as the original error.
  */
 export class DynamodbRefreshTokenProviderRotateFailedError extends DynamodbRefreshTokenProviderError {
   override readonly name: string = 'DynamodbRefreshTokenProviderRotateFailedError';

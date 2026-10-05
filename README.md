@@ -1,8 +1,9 @@
 # DynamoDB Refresh Token Provider
 
-[![npm version](https://img.shields.io/npm/v/dynamodb-refresh-token-provider.svg)](https://www.npmjs.com/package/dynamodb-refresh-token-provider)
-[![License](https://img.shields.io/npm/l/dynamodb-refresh-token-provider.svg)](https://github.com/gammarers-aws-sdk-modules/dynamodb-refresh-token-provider/blob/main/LICENSE)
-[![build](https://github.com/gammarers-aws-sdk-modules/dynamodb-refresh-token-provider/actions/workflows/build.yml/badge.svg)](https://github.com/gammarers-aws-sdk-modules/dynamodb-refresh-token-provider/actions/workflows/build.yml)
+[![npm version](https://img.shields.io/npm/v/dynamodb-refresh-token-provider?style=flat-square)](https://www.npmjs.com/package/dynamodb-refresh-token-provider)
+[![license](https://img.shields.io/npm/l/dynamodb-refresh-token-provider?style=flat-square)](https://www.npmjs.com/package/dynamodb-refresh-token-provider)
+[![Node.js](https://img.shields.io/node/v/dynamodb-refresh-token-provider?style=flat-square)](https://www.npmjs.com/package/dynamodb-refresh-token-provider)
+[![build](https://img.shields.io/github/actions/workflow/status/gammarers-aws-sdk-modules/dynamodb-refresh-token-provider/build.yml?label=build&style=flat-square)](https://github.com/gammarers-aws-sdk-modules/dynamodb-refresh-token-provider/actions/workflows/build.yml)
 
 TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** using AWS SDK for JavaScript v3. Tokens are persisted under a hash of the plaintext value; **issue**, **rotate** (with reuse detection via a transactional write), **revoke** (idempotent), **revokeSession** (session-wide family revocation), and **revokeSubject** (subject-wide revocation across all sessions) are supported.
 
@@ -15,18 +16,28 @@ TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** 
 - **Rotation safety** — marks the old row as rotated and inserts the successor in one transaction; detects reuse and conflicting updates.
 - **Session revocation (OAuth 2.0 BCP)** — `revokeSession({ sessionId })` revokes all tokens for a session via a `sessionId` GSI; optional `revokeSessionOnReuse` cascades on reuse detection.
 - **Subject revocation** — `revokeSubject({ subjectId })` revokes every token for a user across all sessions via a `subjectId` GSI (logout all devices, password change, account suspension).
-- **Structured errors** — `DynamodbRefreshTokenProviderInvalidError`, `DynamodbRefreshTokenProviderExpiredError`, `DynamodbRefreshTokenProviderRevokedError`, `DynamodbRefreshTokenProviderReusedError` (with optional `subjectId` / `sessionId`), `DynamodbRefreshTokenProviderRotateFailedError`, and `DynamodbRefreshTokenProviderValidateError`, all extending `DynamodbRefreshTokenProviderError`. Check a subclass before the base.
+- **Structured errors** — `DynamodbRefreshTokenProviderValidateError` (invalid constructor options), `DynamodbRefreshTokenProviderInvalidError`, `DynamodbRefreshTokenProviderExpiredError`, `DynamodbRefreshTokenProviderRevokedError`, and `DynamodbRefreshTokenProviderReusedError` (with optional `subjectId` / `sessionId`). All extend `DynamodbRefreshTokenProviderError`. Check a subclass before the base.
 - **Utilities** — `sha256Hex` and `randomToken` for hashing and token generation aligned with the store.
 - **Injectable DynamoDB client** — pass an existing `DynamoDBDocumentClient`, or a `DynamoDBClientConfig` for credentials, retries, and request handlers.
 
 ## Installation
 
+### npm
+
 ```bash
 npm install dynamodb-refresh-token-provider
 ```
 
+### yarn
+
 ```bash
 yarn add dynamodb-refresh-token-provider
+```
+
+### pnpm
+
+```bash
+pnpm add dynamodb-refresh-token-provider
 ```
 
 ## Usage
@@ -203,6 +214,8 @@ aws dynamodb update-table \
 ## Options
 
 Constructor: `new DynamodbRefreshTokenProvider(tableName, region, options?)`.
+
+Invalid `tokenBytes`, `ttlSeconds`, or `ttlDays`, or setting both `documentClient` and `clientConfig`, throws `DynamodbRefreshTokenProviderValidateError`.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|

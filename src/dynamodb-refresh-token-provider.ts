@@ -65,6 +65,8 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   private readonly tokenBytes: number;
 
   /**
+   * Creates a provider for the refresh-token table.
+   *
    * @param tableName - DynamoDB table name for refresh token items.
    * @param region - AWS region used when this class constructs the DynamoDB client.
    *   Unused for client construction when {@link StoreOptions.documentClient} is set.
