@@ -32,7 +32,12 @@ export { DynamodbRefreshTokenProvider } from './dynamodb-refresh-token-provider'
  * Structured errors for `instanceof` handling in auth flows.
  * Check a concrete subclass before {@link DynamodbRefreshTokenProviderError}.
  * {@link DynamodbRefreshTokenProviderReusedError} may carry `subjectId` / `sessionId` for session revoke.
+ * {@link DynamodbRefreshTokenProviderRotateError} marks a non-reuse rotate failure that may be retried.
  */
+export type {
+  DynamodbRefreshTokenProviderReusedErrorContext,
+  DynamodbRefreshTokenProviderRotateErrorOptions,
+} from './core/errors';
 export {
   DynamodbRefreshTokenProviderError,
   DynamodbRefreshTokenProviderValidateError,
@@ -40,7 +45,7 @@ export {
   DynamodbRefreshTokenProviderInvalidError,
   DynamodbRefreshTokenProviderReusedError,
   DynamodbRefreshTokenProviderRevokedError,
-  DynamodbRefreshTokenProviderRotateFailedError,
+  DynamodbRefreshTokenProviderRotateError,
 } from './core/errors';
 
 /** SHA-256 hex hashing and cryptographically secure token generation. */

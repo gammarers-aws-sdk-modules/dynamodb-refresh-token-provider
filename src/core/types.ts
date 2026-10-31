@@ -246,8 +246,10 @@ export interface RefreshTokenStore {
    * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token is invalid or no row exists.
    * @throws {@link DynamodbRefreshTokenProviderExpiredError} When `expiresAt` is not after `now`.
    * @throws {@link DynamodbRefreshTokenProviderRevokedError} When the row has `revokedAt` set.
-   * @throws {@link DynamodbRefreshTokenProviderReusedError} When the token was already rotated or the transaction
-   *   failed conditionally. May include `subjectId` / `sessionId` from the store row.
+   * @throws {@link DynamodbRefreshTokenProviderReusedError} When the token was already rotated, or the current
+   *   token's condition failed during rotation. May include `subjectId` / `sessionId` from the store row.
+   * @throws {@link DynamodbRefreshTokenProviderRotateError} When rotation failed for a reason other than
+   *   reuse (e.g. throttling or a transaction conflict). The token is not consumed and may be retried.
    */
   rotate(params: RotateParams): Promise<RotateResult>;
 

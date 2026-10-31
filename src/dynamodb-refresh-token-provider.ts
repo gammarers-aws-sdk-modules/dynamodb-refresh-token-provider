@@ -6,6 +6,7 @@ import {
   DynamodbRefreshTokenProviderInvalidError,
   DynamodbRefreshTokenProviderReusedError,
   DynamodbRefreshTokenProviderRevokedError,
+  DynamodbRefreshTokenProviderRotateError,
   DynamodbRefreshTokenProviderValidateError,
 } from './core/errors';
 import { randomToken, sha256Hex } from './core/hash';
@@ -46,6 +47,30 @@ const CONDITIONAL_CHECK_FAILED_EXCEPTION = 'ConditionalCheckFailedException';
 
 /** DynamoDB error name when a transactional write is canceled. */
 const TRANSACTION_CANCELED_EXCEPTION = 'TransactionCanceledException';
+
+/** Cancellation reason code when an item's condition expression fails inside a transaction. */
+const CONDITIONAL_CHECK_FAILED_REASON = 'ConditionalCheckFailed';
+
+/** Index of the current-token Update in the rotate `TransactItems`. */
+const ROTATE_CURRENT_TOKEN_ITEM_INDEX = 0;
+
+/**
+ * Returns whether a canceled rotate transaction failed on the current-token Update condition,
+ * which means another request already rotated or revoked the token.
+ *
+ * @param error - `TransactionCanceledException` from the rotate transaction.
+ * @returns `true` only when `CancellationReasons` marks the current-token item as `ConditionalCheckFailed`.
+ */
+const isCurrentTokenConditionFailed = (error: Error): boolean => {
+  if (!('CancellationReasons' in error) || !Array.isArray(error.CancellationReasons)) {
+    return false;
+  }
+  const reason: unknown = error.CancellationReasons[ROTATE_CURRENT_TOKEN_ITEM_INDEX];
+  if (typeof reason !== 'object' || reason === null || !('Code' in reason)) {
+    return false;
+  }
+  return reason.Code === CONDITIONAL_CHECK_FAILED_REASON;
+};
 
 /**
  * {@link RefreshTokenStore} implementation backed by a single DynamoDB table.
@@ -137,8 +162,11 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token format is invalid or no row exists.
    * @throws {@link DynamodbRefreshTokenProviderExpiredError} When `expiresAt` is not after `now`.
    * @throws {@link DynamodbRefreshTokenProviderRevokedError} When the token row has `revokedAt` set.
-   * @throws {@link DynamodbRefreshTokenProviderReusedError} When the token was already rotated or the transaction
-   *   indicates reuse. Includes `subjectId` and `sessionId` from the loaded row.
+   * @throws {@link DynamodbRefreshTokenProviderReusedError} When the token was already rotated, or the
+   *   transaction was canceled because the current token's condition failed (concurrent rotate or revoke).
+   *   Includes `subjectId` and `sessionId` from the loaded row.
+   * @throws {@link DynamodbRefreshTokenProviderRotateError} When the transaction was canceled for any
+   *   other reason (throttling, transaction conflict, successor insert failure). The token is not consumed.
    */
   public rotate = async (params: RotateParams): Promise<RotateResult> => {
     // validate refresh token
@@ -208,11 +236,13 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
       }));
 
     } catch (error: unknown) {
-      if (error instanceof Error && error.name === TRANSACTION_CANCELED_EXCEPTION) {
-        // Treat conditional transaction failure as token reuse.
+      if (!(error instanceof Error) || error.name !== TRANSACTION_CANCELED_EXCEPTION) {
+        throw error;
+      }
+      if (isCurrentTokenConditionFailed(error)) {
         await this.handleRefreshTokenReuse(current, now);
       }
-      throw error;
+      throw new DynamodbRefreshTokenProviderRotateError(undefined, { cause: error });
     }
 
     return {
@@ -399,7 +429,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * when {@link StoreOptions.revokeSessionOnReuse} is true, then throws {@link DynamodbRefreshTokenProviderReusedError}
    * populated with `subjectId` / `sessionId` from `current`.
    *
-   * @param current - Token row that indicated reuse (`rotatedAt` set or transaction canceled).
+   * @param current - Token row that indicated reuse (`rotatedAt` set or current-token condition failed).
    * @param now - Clock used for `revokedAt` when cascading revoke is enabled.
    * @throws {@link DynamodbRefreshTokenProviderReusedError} Always (return type is `never`).
    */

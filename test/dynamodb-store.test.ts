@@ -13,10 +13,14 @@ import {
   DynamodbRefreshTokenProviderExpiredError,
   DynamodbRefreshTokenProviderInvalidError,
   DynamodbRefreshTokenProviderRevokedError,
+  DynamodbRefreshTokenProviderRotateError,
   DynamodbRefreshTokenProviderValidateError,
 } from '../src';
 
 const mockSend = jest.fn();
+
+const transactionCanceled = (reasons?: ReadonlyArray<{ Code: string }>): Error =>
+  Object.assign(new Error('tx'), { name: 'TransactionCanceledException', CancellationReasons: reasons });
 const mockDynamoDBClient = DynamoDBClient as unknown as jest.Mock;
 
 jest.mock('@aws-sdk/client-dynamodb', () => {
@@ -272,7 +276,7 @@ describe('DynamodbRefreshTokenProvider', () => {
       expect(out.refreshTokenExpiresAt).toBe(nowSec + defaultTtlSec);
     });
 
-    it('should map TransactionCanceledException to DynamodbRefreshTokenProviderReusedError', async () => {
+    it('should map current-token ConditionalCheckFailed to DynamodbRefreshTokenProviderReusedError', async () => {
       mockSend
         .mockResolvedValueOnce({
           Item: {
@@ -283,7 +287,7 @@ describe('DynamodbRefreshTokenProvider', () => {
             expiresAt: futureExpiresAt,
           },
         })
-        .mockRejectedValueOnce(Object.assign(new Error('tx'), { name: 'TransactionCanceledException' }));
+        .mockRejectedValueOnce(transactionCanceled([{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }]));
 
       const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
       await expect(
@@ -295,7 +299,13 @@ describe('DynamodbRefreshTokenProvider', () => {
       });
     });
 
-    it('should revoke session on TransactionCanceledException when revokeSessionOnReuse is true', async () => {
+    it.each([
+      ['throttling', [{ Code: 'ThrottlingError' }, { Code: 'None' }]],
+      ['transaction conflict', [{ Code: 'TransactionConflict' }, { Code: 'None' }]],
+      ['successor insert condition', [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }]],
+      ['missing reasons', undefined],
+    ] as const)('should map %s cancellation to DynamodbRefreshTokenProviderRotateError', async (_label, reasons) => {
+      const txError = transactionCanceled(reasons);
       mockSend
         .mockResolvedValueOnce({
           Item: {
@@ -306,7 +316,29 @@ describe('DynamodbRefreshTokenProvider', () => {
             expiresAt: futureExpiresAt,
           },
         })
-        .mockRejectedValueOnce(Object.assign(new Error('tx'), { name: 'TransactionCanceledException' }))
+        .mockRejectedValueOnce(txError);
+
+      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+        revokeSessionOnReuse: true,
+      });
+      const promise = store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow });
+      await expect(promise).rejects.toThrow(DynamodbRefreshTokenProviderRotateError);
+      await expect(promise).rejects.toMatchObject({ cause: txError });
+      expect(mockSend).toHaveBeenCalledTimes(2);
+    });
+
+    it('should revoke session on current-token ConditionalCheckFailed when revokeSessionOnReuse is true', async () => {
+      mockSend
+        .mockResolvedValueOnce({
+          Item: {
+            pk: 'rt#current',
+            subjectId: 'sub',
+            sessionId: 'sess',
+            createdAt: 1,
+            expiresAt: futureExpiresAt,
+          },
+        })
+        .mockRejectedValueOnce(transactionCanceled([{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }]))
         .mockResolvedValueOnce({ Items: [{ pk: 'rt#current' }] })
         .mockResolvedValueOnce({});
 

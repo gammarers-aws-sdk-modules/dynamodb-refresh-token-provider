@@ -4,7 +4,7 @@ import {
   DynamodbRefreshTokenProviderInvalidError,
   DynamodbRefreshTokenProviderReusedError,
   DynamodbRefreshTokenProviderRevokedError,
-  DynamodbRefreshTokenProviderRotateFailedError,
+  DynamodbRefreshTokenProviderRotateError,
   DynamodbRefreshTokenProviderValidateError,
 } from '../src';
 
@@ -31,8 +31,8 @@ describe('refresh token errors', () => {
       'This refresh token has already been rotated and cannot be used again.',
     ],
     [
-      'DynamodbRefreshTokenProviderRotateFailedError',
-      DynamodbRefreshTokenProviderRotateFailedError,
+      'DynamodbRefreshTokenProviderRotateError',
+      DynamodbRefreshTokenProviderRotateError,
       'The refresh token could not be rotated. Please try signing in again.',
     ],
   ] as const)('should have default message for %s', (_label, Ctor, expected) => {
@@ -58,6 +58,13 @@ describe('refresh token errors', () => {
     expect(err.message).toBe(
       'This refresh token has already been rotated and cannot be used again.',
     );
+  });
+
+  it('should attach cause on DynamodbRefreshTokenProviderRotateError', () => {
+    const cause = new Error('tx');
+    const err = new DynamodbRefreshTokenProviderRotateError(undefined, { cause });
+    expect(err.cause).toBe(cause);
+    expect(err.message).toBe('The refresh token could not be rotated. Please try signing in again.');
   });
 
   it('should keep the validate error message and prototype chain', () => {
