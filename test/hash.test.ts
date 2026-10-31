@@ -1,6 +1,19 @@
 import crypto from 'crypto';
 
 import { randomToken, sha256Hex } from '../src';
+import { base64UrlLength } from '../src/core/hash';
+
+describe('base64UrlLength', () => {
+  it.each([
+    [1, 2],
+    [16, 22],
+    [32, 43],
+    [64, 86],
+  ] as const)('base64UrlLength(%i) is %i', (bytes, expected) => {
+    expect(base64UrlLength(bytes)).toBe(expected);
+    expect(randomToken(bytes).length).toBe(expected);
+  });
+});
 
 describe('sha256Hex', () => {
   it('should return lowercase hex digest of input', () => {

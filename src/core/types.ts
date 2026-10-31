@@ -65,6 +65,7 @@ export type StoreOptions = {
 
   /**
    * Custom DynamoDB API endpoint (e.g. LocalStack or DynamoDB Local).
+   * When omitted, the AWS SDK resolves the endpoint for the region (including FIPS, dual-stack, and China partitions).
    * Applied when this provider constructs the client. Ignored when {@link StoreOptions.documentClient} is set.
    * Overridden by `endpoint` on {@link StoreOptions.clientConfig} when both are set.
    */
@@ -73,15 +74,15 @@ export type StoreOptions = {
   /**
    * Existing document client. Commands are sent through this client.
    * The provider does not construct `DynamoDBClient` or call `DynamoDBDocumentClient.from`.
-   * `clientConfig`, `endpoint`, and `translateConfig` are not applied, and the constructor
-   * `region` is not used to build a client. Mutually exclusive with {@link StoreOptions.clientConfig}.
+   * `clientConfig`, `endpoint`, `translateConfig`, and `region` are not applied.
+   * Mutually exclusive with {@link StoreOptions.clientConfig}.
    * Use this to share a client, including one created from an X-Ray-wrapped `DynamoDBClient`.
    */
   documentClient?: DynamoDBDocumentClient;
 
   /**
    * Config for the internally constructed `DynamoDBClient` (credentials, retries, request handler, and so on).
-   * The constructor `region` and {@link StoreOptions.endpoint} are the base; fields on this object override them.
+   * `region` and {@link StoreOptions.endpoint} are the base; fields on this object override them.
    * Mutually exclusive with {@link StoreOptions.documentClient}.
    */
   clientConfig?: DynamoDBClientConfig;
@@ -109,6 +110,23 @@ export type StoreOptions = {
    * @defaultValue false
    */
   revokeSessionOnReuse?: boolean;
+};
+
+/**
+ * Options for the recommended {@link DynamodbRefreshTokenProvider} constructor form:
+ * the table name plus every {@link StoreOptions} field.
+ */
+export type DynamodbRefreshTokenProviderOptions = StoreOptions & {
+  /** DynamoDB table name for refresh token items. */
+  tableName: string;
+
+  /**
+   * AWS region for the client this provider constructs.
+   * When omitted, the AWS SDK resolves it (e.g. `AWS_REGION`, shared config, or the Lambda runtime).
+   * Overridden by `region` on {@link StoreOptions.clientConfig} when both are set.
+   * Ignored when {@link StoreOptions.documentClient} is set.
+   */
+  region?: string;
 };
 
 /** Parameters for {@link RefreshTokenStore.issue}. */

@@ -16,6 +16,7 @@ export type {
   RevokeSubjectParams,
   RevokeSubjectResult,
   DocumentClientTranslateConfig,
+  DynamodbRefreshTokenProviderOptions,
   StoreOptions,
   TokenRecord,
   EpochSec,

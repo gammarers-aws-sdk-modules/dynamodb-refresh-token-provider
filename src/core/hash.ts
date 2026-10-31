@@ -1,7 +1,23 @@
 import crypto from 'crypto';
 
 /** Default random byte length for {@link randomToken} (32 → 256-bit). */
-const DEFAULT_RANDOM_TOKEN_BYTES = 32;
+export const DEFAULT_RANDOM_TOKEN_BYTES = 32;
+
+/** Bits in one byte. */
+const BITS_PER_BYTE = 8;
+
+/** Bits encoded by one base64url character. */
+const BITS_PER_BASE64URL_CHAR = 6;
+
+/**
+ * Length of the unpadded base64url string produced by {@link randomToken} for `bytes` random bytes.
+ *
+ * @param bytes - Number of random bytes.
+ * @returns Expected token length in characters (e.g. 32 → 43).
+ */
+export const base64UrlLength = (bytes: number): number => {
+  return Math.ceil((bytes * BITS_PER_BYTE) / BITS_PER_BASE64URL_CHAR);
+};
 
 /**
  * SHA-256 digest of `input` as a lowercase hexadecimal string.

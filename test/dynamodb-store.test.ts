@@ -1,4 +1,4 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, type DynamoDBClientConfig } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
   GetCommand,
@@ -61,7 +61,7 @@ describe('DynamodbRefreshTokenProvider', () => {
     it('should put item with expected keys and return token metadata', async () => {
       mockSend.mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       const result = await store.issue({
         subjectId: 'sub-1',
         sessionId: 'sess-1',
@@ -88,7 +88,8 @@ describe('DynamodbRefreshTokenProvider', () => {
     it('should respect ttlDays and pkPrefix options', async () => {
       mockSend.mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('t', 'eu-west-1', {
+      const store = new DynamodbRefreshTokenProvider({
+        tableName: 't',
         ttlDays: 7,
         pkPrefix: 'custom#',
       });
@@ -105,7 +106,8 @@ describe('DynamodbRefreshTokenProvider', () => {
     it('should respect ttlSeconds over ttlDays', async () => {
       mockSend.mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('t', 'eu-west-1', {
+      const store = new DynamodbRefreshTokenProvider({
+        tableName: 't',
         ttlDays: 7,
         ttlSeconds: 3600,
       });
@@ -122,7 +124,7 @@ describe('DynamodbRefreshTokenProvider', () => {
       mockSend.mockResolvedValueOnce({});
 
       const tokenBytes = 16;
-      const store = new DynamodbRefreshTokenProvider('t', 'eu-west-1', { tokenBytes });
+      const store = new DynamodbRefreshTokenProvider({ tableName: 't', tokenBytes });
       const result = await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
 
       expect(result.refreshToken.length).toBe(Math.ceil(tokenBytes * 8 / 6));
@@ -131,7 +133,7 @@ describe('DynamodbRefreshTokenProvider', () => {
 
   describe('rotate', () => {
     it('should throw DynamodbRefreshTokenProviderInvalidError for malformed token before calling DynamoDB', async () => {
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       await expect(store.rotate({ refreshToken: '' })).rejects.toThrow(DynamodbRefreshTokenProviderInvalidError);
       await expect(store.rotate({ refreshToken: 'short' })).rejects.toThrow(DynamodbRefreshTokenProviderInvalidError);
       expect(mockSend).not.toHaveBeenCalled();
@@ -140,12 +142,40 @@ describe('DynamodbRefreshTokenProvider', () => {
     it('should throw DynamodbRefreshTokenProviderInvalidError when item is missing', async () => {
       mockSend.mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toThrow(DynamodbRefreshTokenProviderInvalidError);
       expect(mockSend).toHaveBeenCalledTimes(1);
       expect(mockSend.mock.calls[0][0]).toBeInstanceOf(GetCommand);
+    });
+
+    it.each([
+      ['missing subjectId', { pk: 'rt#x', sessionId: 'sess', createdAt: 1, expiresAt: futureExpiresAt }],
+      ['non-numeric expiresAt', { pk: 'rt#x', subjectId: 's', sessionId: 'sess', expiresAt: 'soon' }],
+      ['non-numeric rotatedAt', { pk: 'rt#x', subjectId: 's', sessionId: 's', expiresAt: futureExpiresAt, rotatedAt: 'x' }],
+    ])('should throw DynamodbRefreshTokenProviderInvalidError for a row with %s', async (_label, item) => {
+      mockSend.mockResolvedValueOnce({ Item: item });
+
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
+      await expect(
+        store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
+      ).rejects.toThrow(DynamodbRefreshTokenProviderInvalidError);
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+
+    it('should rotate a row written before ttl was introduced', async () => {
+      mockSend
+        .mockResolvedValueOnce({
+          Item: { pk: 'rt#legacy', subjectId: 'sub', sessionId: 'sess', expiresAt: futureExpiresAt },
+        })
+        .mockResolvedValueOnce({});
+
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
+      const out = await store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow });
+
+      expect(out.subjectId).toBe('sub');
+      expect(mockSend).toHaveBeenCalledTimes(2);
     });
 
     it('should throw DynamodbRefreshTokenProviderExpiredError when expiresAt is not after now', async () => {
@@ -159,7 +189,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         },
       });
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toThrow(DynamodbRefreshTokenProviderExpiredError);
@@ -177,7 +207,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         },
       });
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toThrow(DynamodbRefreshTokenProviderRevokedError);
@@ -195,7 +225,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         },
       });
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toMatchObject({
@@ -224,7 +254,8 @@ describe('DynamodbRefreshTokenProvider', () => {
         .mockResolvedValueOnce({})
         .mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+      const store = new DynamodbRefreshTokenProvider({
+        tableName: 'tbl',
         revokeSessionOnReuse: true,
       });
       await expect(
@@ -254,7 +285,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         })
         .mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       const out = await store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow });
 
       expect(mockSend).toHaveBeenCalledTimes(2);
@@ -289,7 +320,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         })
         .mockRejectedValueOnce(transactionCanceled([{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }]));
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toMatchObject({
@@ -318,7 +349,8 @@ describe('DynamodbRefreshTokenProvider', () => {
         })
         .mockRejectedValueOnce(txError);
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+      const store = new DynamodbRefreshTokenProvider({
+        tableName: 'tbl',
         revokeSessionOnReuse: true,
       });
       const promise = store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow });
@@ -342,7 +374,8 @@ describe('DynamodbRefreshTokenProvider', () => {
         .mockResolvedValueOnce({ Items: [{ pk: 'rt#current' }] })
         .mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+      const store = new DynamodbRefreshTokenProvider({
+        tableName: 'tbl',
         revokeSessionOnReuse: true,
       });
       await expect(
@@ -370,7 +403,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         })
         .mockRejectedValueOnce(Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' }));
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       await expect(
         store.rotate({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toMatchObject({
@@ -382,7 +415,7 @@ describe('DynamodbRefreshTokenProvider', () => {
 
   describe('revoke', () => {
     it('should throw DynamodbRefreshTokenProviderInvalidError for invalid token string', async () => {
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       await expect(store.revoke({ refreshToken: 'x' })).rejects.toThrow(DynamodbRefreshTokenProviderInvalidError);
       expect(mockSend).not.toHaveBeenCalled();
     });
@@ -390,7 +423,7 @@ describe('DynamodbRefreshTokenProvider', () => {
     it('should send update and return true on success', async () => {
       mockSend.mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       const ok = await store.revoke({ refreshToken: VALID_TOKEN, now: fixedNow });
 
       expect(ok).toBe(true);
@@ -405,7 +438,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         Object.assign(new Error('conditional'), { name: 'ConditionalCheckFailedException' }),
       );
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       const ok = await store.revoke({ refreshToken: VALID_TOKEN, now: fixedNow });
       expect(ok).toBe(true);
     });
@@ -415,7 +448,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         Object.assign(new Error('boom'), { name: 'InternalServerError' }),
       );
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       await expect(
         store.revoke({ refreshToken: VALID_TOKEN, now: fixedNow }),
       ).rejects.toMatchObject({
@@ -434,7 +467,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         .mockResolvedValueOnce({})
         .mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       const result = await store.revokeSession({
         sessionId: 'sess-1',
         subjectId: 'sub-1',
@@ -473,7 +506,8 @@ describe('DynamodbRefreshTokenProvider', () => {
         })
         .mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+      const store = new DynamodbRefreshTokenProvider({
+        tableName: 'tbl',
         sessionIdIndexName: 'custom-session-index',
       });
       const result = await store.revokeSession({ sessionId: 'sess', now: fixedNow });
@@ -498,7 +532,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         )
         .mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       const result = await store.revokeSession({ sessionId: 'sess', now: fixedNow });
       expect(result.revokedCount).toBe(1);
     });
@@ -510,7 +544,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         })
         .mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       const result = await store.revokeSession({ sessionId: 'sess', now: fixedNow });
 
       expect(result.revokedCount).toBe(1);
@@ -521,7 +555,7 @@ describe('DynamodbRefreshTokenProvider', () => {
     it('should treat undefined Items as empty and return zero revoked', async () => {
       mockSend.mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       const result = await store.revokeSession({ sessionId: 'sess', now: fixedNow });
       expect(result.revokedCount).toBe(0);
       expect(mockSend).toHaveBeenCalledTimes(1);
@@ -536,7 +570,7 @@ describe('DynamodbRefreshTokenProvider', () => {
           Object.assign(new Error('denied'), { name: 'AccessDeniedException' }),
         );
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       await expect(
         store.revokeSession({ sessionId: 'sess', now: fixedNow }),
       ).rejects.toMatchObject({
@@ -555,7 +589,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         .mockResolvedValueOnce({})
         .mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       const result = await store.revokeSubject({
         subjectId: 'sub-1',
         now: fixedNow,
@@ -590,7 +624,8 @@ describe('DynamodbRefreshTokenProvider', () => {
         })
         .mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+      const store = new DynamodbRefreshTokenProvider({
+        tableName: 'tbl',
         subjectIdIndexName: 'custom-subject-index',
       });
       const result = await store.revokeSubject({ subjectId: 'sub', now: fixedNow });
@@ -615,7 +650,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         )
         .mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       const result = await store.revokeSubject({ subjectId: 'sub', now: fixedNow });
       expect(result.revokedCount).toBe(1);
     });
@@ -623,7 +658,7 @@ describe('DynamodbRefreshTokenProvider', () => {
     it('should treat undefined Items as empty and return zero revoked', async () => {
       mockSend.mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       const result = await store.revokeSubject({ subjectId: 'sub', now: fixedNow });
       expect(result.revokedCount).toBe(0);
       expect(mockSend).toHaveBeenCalledTimes(1);
@@ -638,7 +673,7 @@ describe('DynamodbRefreshTokenProvider', () => {
           Object.assign(new Error('denied'), { name: 'AccessDeniedException' }),
         );
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       await expect(
         store.revokeSubject({ subjectId: 'sub', now: fixedNow }),
       ).rejects.toMatchObject({
@@ -650,16 +685,16 @@ describe('DynamodbRefreshTokenProvider', () => {
 
   describe('options', () => {
     it('should throw DynamodbRefreshTokenProviderValidateError for invalid tokenBytes', () => {
-      expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { tokenBytes: 0 }))
+      expect(() => new DynamodbRefreshTokenProvider({ tableName: 'tbl', tokenBytes: 0 }))
         .toThrow(new DynamodbRefreshTokenProviderValidateError('tokenBytes must be a positive integer'));
-      expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { tokenBytes: 1.5 }))
+      expect(() => new DynamodbRefreshTokenProvider({ tableName: 'tbl', tokenBytes: 1.5 }))
         .toThrow(new DynamodbRefreshTokenProviderValidateError('tokenBytes must be a positive integer'));
     });
 
     it('should throw DynamodbRefreshTokenProviderValidateError for invalid ttlSeconds or ttlDays', () => {
-      expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { ttlSeconds: 0 }))
+      expect(() => new DynamodbRefreshTokenProvider({ tableName: 'tbl', ttlSeconds: 0 }))
         .toThrow(new DynamodbRefreshTokenProviderValidateError('ttlSeconds must be a positive number'));
-      expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { ttlDays: -1 }))
+      expect(() => new DynamodbRefreshTokenProvider({ tableName: 'tbl', ttlDays: -1 }))
         .toThrow(new DynamodbRefreshTokenProviderValidateError('ttlDays must be a positive number'));
     });
 
@@ -669,7 +704,7 @@ describe('DynamodbRefreshTokenProvider', () => {
       const translateConfig = {
         marshallOptions: { removeUndefinedValues: true },
       };
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { translateConfig });
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl', translateConfig });
       await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
 
       expect(DynamoDBDocumentClient.from).toHaveBeenCalledWith(
@@ -681,31 +716,62 @@ describe('DynamodbRefreshTokenProvider', () => {
     it('should use custom endpoint when constructing the DynamoDB client', async () => {
       mockSend.mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+      const store = new DynamodbRefreshTokenProvider({
+        tableName: 'tbl',
         endpoint: 'http://localhost:8000',
       });
       await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
 
       expect(mockDynamoDBClient).toHaveBeenCalledWith({
-        region: 'us-east-1',
         endpoint: 'http://localhost:8000',
       });
       expect(DynamoDBDocumentClient.from).toHaveBeenCalled();
       expect(mockSend).toHaveBeenCalledTimes(1);
     });
 
+    it('should leave region and endpoint unset so the AWS SDK resolves them', async () => {
+      mockSend.mockResolvedValueOnce({});
+
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
+      await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
+
+      const config = mockDynamoDBClient.mock.calls[0][0] as DynamoDBClientConfig;
+      expect(config.region).toBeUndefined();
+      expect(config.endpoint).toBeUndefined();
+    });
+
+    it('should pass the region option to DynamoDBClient', async () => {
+      mockSend.mockResolvedValueOnce({});
+
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl', region: 'ap-northeast-1' });
+      await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
+
+      const config = mockDynamoDBClient.mock.calls[0][0] as DynamoDBClientConfig;
+      expect(config.region).toBe('ap-northeast-1');
+      expect(config.endpoint).toBeUndefined();
+    });
+
+    it('should accept the positional constructor form for compatibility', async () => {
+      mockSend.mockResolvedValueOnce({});
+
+      const store = new DynamodbRefreshTokenProvider('legacy-tbl', 'eu-west-1', { ttlDays: 7 });
+      await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
+
+      const cmd = mockSend.mock.calls[0][0] as PutCommand;
+      expect(cmd.input.TableName).toBe('legacy-tbl');
+      expect(cmd.input.Item).toMatchObject({ expiresAt: nowSec + 7 * 24 * 60 * 60 });
+      const config = mockDynamoDBClient.mock.calls[0][0] as DynamoDBClientConfig;
+      expect(config.region).toBe('eu-west-1');
+    });
+
     it('should reuse the document client across calls', async () => {
       mockSend.mockResolvedValue({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
       await store.issue({ subjectId: 'c', sessionId: 'd', now: fixedNow });
 
       expect(mockDynamoDBClient).toHaveBeenCalledTimes(1);
-      expect(mockDynamoDBClient).toHaveBeenCalledWith({
-        region: 'us-east-1',
-        endpoint: 'https://dynamodb.us-east-1.amazonaws.com',
-      });
       expect(DynamoDBDocumentClient.from).toHaveBeenCalledTimes(1);
       expect(mockSend).toHaveBeenCalledTimes(2);
     });
@@ -715,7 +781,7 @@ describe('DynamodbRefreshTokenProvider', () => {
       // Test double: the store only calls `send` on an injected client.
       const documentClient = { send } as unknown as DynamoDBDocumentClient;
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', { documentClient });
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl', documentClient });
       await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
       await store.issue({ subjectId: 'c', sessionId: 'd', now: fixedNow });
 
@@ -731,7 +797,8 @@ describe('DynamodbRefreshTokenProvider', () => {
         accessKeyId: 'access-key',
         secretAccessKey: 'secret-key',
       };
-      const store = new DynamodbRefreshTokenProvider('tbl', 'ap-northeast-1', {
+      const store = new DynamodbRefreshTokenProvider({
+        tableName: 'tbl',
         endpoint: 'http://localhost:8000',
         clientConfig: {
           region: 'eu-west-1',
@@ -753,7 +820,8 @@ describe('DynamodbRefreshTokenProvider', () => {
     it('should let clientConfig.endpoint override the endpoint option', async () => {
       mockSend.mockResolvedValueOnce({});
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+      const store = new DynamodbRefreshTokenProvider({
+        tableName: 'tbl',
         endpoint: 'http://localhost:8000',
         clientConfig: {
           endpoint: 'http://localhost:4566',
@@ -762,7 +830,6 @@ describe('DynamodbRefreshTokenProvider', () => {
       await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
 
       expect(mockDynamoDBClient).toHaveBeenCalledWith({
-        region: 'us-east-1',
         endpoint: 'http://localhost:4566',
       });
     });
@@ -770,7 +837,8 @@ describe('DynamodbRefreshTokenProvider', () => {
     it('should throw DynamodbRefreshTokenProviderValidateError when documentClient and clientConfig are both set', () => {
       const documentClient = { send: jest.fn() } as unknown as DynamoDBDocumentClient;
 
-      expect(() => new DynamodbRefreshTokenProvider('tbl', 'us-east-1', {
+      expect(() => new DynamodbRefreshTokenProvider({
+        tableName: 'tbl',
         documentClient,
         clientConfig: { maxAttempts: 2 },
       })).toThrow(new DynamodbRefreshTokenProviderValidateError(
@@ -796,7 +864,7 @@ describe('DynamodbRefreshTokenProvider', () => {
         .mockResolvedValueOnce({})
         .mockResolvedValueOnce({ Items: [] });
 
-      const store = new DynamodbRefreshTokenProvider('tbl', 'us-east-1');
+      const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
       await store.issue({ subjectId: 'a', sessionId: 'b' });
       await store.rotate({ refreshToken: VALID_TOKEN });
       await store.revoke({ refreshToken: VALID_TOKEN });

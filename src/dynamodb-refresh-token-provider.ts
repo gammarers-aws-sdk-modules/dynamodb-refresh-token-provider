@@ -9,13 +9,14 @@ import {
   DynamodbRefreshTokenProviderRotateError,
   DynamodbRefreshTokenProviderValidateError,
 } from './core/errors';
-import { randomToken, sha256Hex } from './core/hash';
+import { base64UrlLength, DEFAULT_RANDOM_TOKEN_BYTES, randomToken, sha256Hex } from './core/hash';
 import { hasNextPage } from './core/paging-predicates';
-import { epochSec } from './core/time';
+import { epochSec, SECONDS_PER_DAY } from './core/time';
+import { isLoadedTokenRecord, type LoadedTokenRecord } from './core/token-record-predicates';
 import type {
+  DynamodbRefreshTokenProviderOptions,
   RefreshTokenStore,
   StoreOptions,
-  TokenRecord,
   IssueParams,
   RotateParams,
   RevokeParams,
@@ -36,11 +37,21 @@ const DEFAULT_SESSION_ID_INDEX_NAME = 'sessionId-index';
 /** Default GSI name for querying token rows by `subjectId`. */
 const DEFAULT_SUBJECT_ID_INDEX_NAME = 'subjectId-index';
 
-/** Default random byte length for generated refresh tokens (32 → 256-bit). */
-const DEFAULT_TOKEN_BYTES = 32;
-
 /** Default token lifetime in days when neither ttlSeconds nor ttlDays is set. */
 const DEFAULT_TTL_DAYS = 60;
+
+/** Condition that the token row exists. */
+const ITEM_EXISTS_CONDITION = 'attribute_exists(pk)';
+
+/** Condition that no row with the new partition key exists yet. */
+const ITEM_NOT_EXISTS_CONDITION = 'attribute_not_exists(pk)';
+
+/** Condition that the current token row exists and is neither rotated nor revoked. */
+const ROTATABLE_CONDITION =
+  `${ITEM_EXISTS_CONDITION} AND attribute_not_exists(rotatedAt) AND attribute_not_exists(revokedAt)`;
+
+/** Update expression that marks a token row as revoked at `:now`. */
+const REVOKE_UPDATE_EXPRESSION = 'SET revokedAt = :now';
 
 /** DynamoDB error name when a condition expression fails. */
 const CONDITIONAL_CHECK_FAILED_EXCEPTION = 'ConditionalCheckFailedException';
@@ -78,13 +89,19 @@ const isCurrentTokenConditionFailed = (error: Error): boolean => {
  * Items use partition key `pk`, logical expiration `expiresAt`, and DynamoDB TTL attribute `ttl`
  * (Unix seconds). Enable table TTL on attribute `ttl` so expired and rotated rows are removed
  * asynchronously. Session-wide revocation requires a GSI whose partition key is `sessionId`
- * (see {@link StoreOptions.sessionIdIndexName}). Callers supply `tableName`, `region`, and optional
- * {@link StoreOptions}. A document client is created lazily from `region` unless
- * {@link StoreOptions.documentClient} is provided.
+ * (see {@link StoreOptions.sessionIdIndexName}). Callers supply {@link DynamodbRefreshTokenProviderOptions}
+ * with at least `tableName`. A document client is created lazily unless
+ * {@link StoreOptions.documentClient} is provided; the AWS SDK resolves region and endpoint when they are omitted.
  */
 export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   /** Lazily initialized and cached document client. */
   private ddb: DynamoDBDocumentClient | null = null;
+
+  /** DynamoDB table name for refresh token items. */
+  private readonly tableName: string;
+
+  /** Resolved constructor options (table name, store options, and optional region). */
+  private readonly options: DynamodbRefreshTokenProviderOptions;
 
   /** Random byte length for generated refresh tokens. */
   private readonly tokenBytes: number;
@@ -92,19 +109,33 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   /**
    * Creates a provider for the refresh-token table.
    *
+   * @param options - Table name, optional region, and {@link StoreOptions}.
+   * @throws {DynamodbRefreshTokenProviderValidateError} When `tokenBytes`, `ttlSeconds`, or `ttlDays` is invalid,
+   *   or when `documentClient` and `clientConfig` are both set.
+   */
+  constructor(options: DynamodbRefreshTokenProviderOptions);
+  /**
+   * Creates a provider for the refresh-token table (positional form, kept for compatibility).
+   *
+   * @deprecated Use `new DynamodbRefreshTokenProvider({ tableName, region, ...options })` instead.
    * @param tableName - DynamoDB table name for refresh token items.
    * @param region - AWS region used when this class constructs the DynamoDB client.
-   *   Unused for client construction when {@link StoreOptions.documentClient} is set.
    * @param options - Token lifetime, PK prefix, GSI names, reuse revocation, client injection, or custom endpoint.
    * @throws {DynamodbRefreshTokenProviderValidateError} When `tokenBytes`, `ttlSeconds`, or `ttlDays` is invalid,
    *   or when `documentClient` and `clientConfig` are both set.
    */
+  constructor(tableName: string, region: string, options?: StoreOptions);
   constructor(
-    private readonly tableName: string,
-    private readonly region: string,
-    private readonly options?: StoreOptions,
+    tableNameOrOptions: string | DynamodbRefreshTokenProviderOptions,
+    region?: string,
+    options?: StoreOptions,
   ) {
-    this.tokenBytes = this.resolveTokenBytes(this.options?.tokenBytes);
+    this.options = typeof tableNameOrOptions === 'string'
+      ? { ...options, tableName: tableNameOrOptions, region }
+      : tableNameOrOptions;
+    this.tableName = this.options.tableName;
+
+    this.tokenBytes = this.resolveTokenBytes(this.options.tokenBytes);
     this.validateTtlOptions(this.options);
     this.validateClientOptions(this.options);
   }
@@ -137,7 +168,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
           expiresAt,
           ttl: expiresAt,
         },
-        ConditionExpression: 'attribute_not_exists(pk)',
+        ConditionExpression: ITEM_NOT_EXISTS_CONDITION,
       }),
     );
 
@@ -207,7 +238,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
               TableName: this.tableName,
               Key: { pk: currentPk },
               UpdateExpression: 'SET rotatedAt = :now, replacedByPk = :nextPk, #ttl = :ttl',
-              ConditionExpression: 'attribute_exists(pk) AND attribute_not_exists(rotatedAt) AND attribute_not_exists(revokedAt)',
+              ConditionExpression: ROTATABLE_CONDITION,
               ExpressionAttributeNames: {
                 '#ttl': 'ttl',
               },
@@ -229,12 +260,11 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
                 expiresAt: nextRefreshTokenExpiresAt,
                 ttl: nextRefreshTokenExpiresAt,
               },
-              ConditionExpression: 'attribute_not_exists(pk)',
+              ConditionExpression: ITEM_NOT_EXISTS_CONDITION,
             },
           },
         ],
       }));
-
     } catch (error: unknown) {
       if (!(error instanceof Error) || error.name !== TRANSACTION_CANCELED_EXCEPTION) {
         throw error;
@@ -279,8 +309,8 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
         new UpdateCommand({
           TableName: this.tableName,
           Key: { pk },
-          UpdateExpression: 'SET revokedAt = :now',
-          ConditionExpression: 'attribute_exists(pk)',
+          UpdateExpression: REVOKE_UPDATE_EXPRESSION,
+          ConditionExpression: ITEM_EXISTS_CONDITION,
           ExpressionAttributeValues: {
             ':now': nowSec,
           },
@@ -309,7 +339,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   public revokeSession = async (params: RevokeSessionParams): Promise<RevokeSessionResult> => {
     const now = params.now ?? new Date();
     const nowSec = epochSec(now);
-    const indexName = this.options?.sessionIdIndexName ?? DEFAULT_SESSION_ID_INDEX_NAME;
+    const indexName = this.options.sessionIdIndexName ?? DEFAULT_SESSION_ID_INDEX_NAME;
 
     const revokedCount = await this.revokeTokenRowsByIndexQuery({
       indexName,
@@ -319,8 +349,8 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
       },
       nowSec,
       updateConditionExpression: params.subjectId
-        ? 'attribute_exists(pk) AND subjectId = :subjectId'
-        : 'attribute_exists(pk)',
+        ? `${ITEM_EXISTS_CONDITION} AND subjectId = :subjectId`
+        : ITEM_EXISTS_CONDITION,
       updateExpressionAttributeValues: params.subjectId
         ? { ':subjectId': params.subjectId }
         : undefined,
@@ -341,7 +371,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   public revokeSubject = async (params: RevokeSubjectParams): Promise<RevokeSubjectResult> => {
     const now = params.now ?? new Date();
     const nowSec = epochSec(now);
-    const indexName = this.options?.subjectIdIndexName ?? DEFAULT_SUBJECT_ID_INDEX_NAME;
+    const indexName = this.options.subjectIdIndexName ?? DEFAULT_SUBJECT_ID_INDEX_NAME;
 
     const revokedCount = await this.revokeTokenRowsByIndexQuery({
       indexName,
@@ -350,7 +380,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
         ':subjectId': params.subjectId,
       },
       nowSec,
-      updateConditionExpression: 'attribute_exists(pk)',
+      updateConditionExpression: ITEM_EXISTS_CONDITION,
     });
 
     return { revokedCount };
@@ -404,7 +434,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
             new UpdateCommand({
               TableName: this.tableName,
               Key: { pk },
-              UpdateExpression: 'SET revokedAt = :now',
+              UpdateExpression: REVOKE_UPDATE_EXPRESSION,
               ConditionExpression: params.updateConditionExpression,
               ExpressionAttributeValues: expressionAttributeValues,
             }),
@@ -433,8 +463,8 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * @param now - Clock used for `revokedAt` when cascading revoke is enabled.
    * @throws {@link DynamodbRefreshTokenProviderReusedError} Always (return type is `never`).
    */
-  private handleRefreshTokenReuse = async (current: TokenRecord, now: Date): Promise<never> => {
-    if (this.options?.revokeSessionOnReuse) {
+  private handleRefreshTokenReuse = async (current: LoadedTokenRecord, now: Date): Promise<never> => {
+    if (this.options.revokeSessionOnReuse) {
       await this.revokeSession({
         sessionId: current.sessionId,
         subjectId: current.subjectId,
@@ -458,7 +488,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    */
   private getDdb = (): DynamoDBDocumentClient => {
     if (!this.ddb) {
-      this.ddb = this.options?.documentClient ?? this.createDocumentClient();
+      this.ddb = this.options.documentClient ?? this.createDocumentClient();
     }
     return this.ddb;
   };
@@ -470,23 +500,23 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    */
   private createDocumentClient = (): DynamoDBDocumentClient => {
     const client = new DynamoDBClient(this.resolveClientConfig());
-    return DynamoDBDocumentClient.from(client, this.options?.translateConfig);
+    return DynamoDBDocumentClient.from(client, this.options.translateConfig);
   };
 
   /**
    * Builds the config for an internally constructed `DynamoDBClient`.
    *
-   * Starts from the constructor `region` and {@link StoreOptions.endpoint} (or the regional
-   * DynamoDB endpoint). {@link StoreOptions.clientConfig} is applied last so its fields win.
+   * Starts from {@link DynamodbRefreshTokenProviderOptions.region} and {@link StoreOptions.endpoint};
+   * omitted values stay `undefined` so the AWS SDK resolves them. {@link StoreOptions.clientConfig}
+   * is applied last so its fields win.
    *
    * @returns Config passed to `new DynamoDBClient`.
    */
   private resolveClientConfig = (): DynamoDBClientConfig => {
-    const endpoint = this.options?.endpoint ?? `https://dynamodb.${this.region}.amazonaws.com`;
     return {
-      region: this.region,
-      endpoint,
-      ...this.options?.clientConfig,
+      region: this.options.region,
+      endpoint: this.options.endpoint,
+      ...this.options.clientConfig,
     };
   };
 
@@ -508,19 +538,29 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * Loads a token row by partition key.
    *
    * @param pk - Full partition key (`prefix` + hash).
-   * @returns Parsed {@link TokenRecord}, or `null` if the item does not exist.
+   * @returns Validated row fields, or `null` if the item does not exist.
+   * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the item lacks required fields or has
+   *   unexpected attribute types.
    */
-  private getTokenRecord = async (pk: string): Promise<TokenRecord | null> => {
+  private getTokenRecord = async (pk: string): Promise<LoadedTokenRecord | null> => {
     const ddb = this.getDdb();
 
     const res = await ddb.send(
       new GetCommand({
         TableName: this.tableName,
         Key: { pk },
-        ConsistentRead: this.options?.consistentRead ?? true,
+        ConsistentRead: this.options.consistentRead ?? true,
       }),
     );
-    return (res.Item as TokenRecord) ?? null;
+
+    const item: Record<string, unknown> | undefined = res.Item;
+    if (!item) {
+      return null;
+    }
+    if (!isLoadedTokenRecord(item)) {
+      throw new DynamodbRefreshTokenProviderInvalidError();
+    }
+    return item;
   };
 
   /**
@@ -529,7 +569,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * @returns Prefix string (e.g. `rt#`).
    */
   private getPrimaryKeyPrefix = (): string => {
-    return `${this.options?.pkPrefix ?? DEFAULT_PRIMARY_KEY_PREFIX}`;
+    return this.options.pkPrefix ?? DEFAULT_PRIMARY_KEY_PREFIX;
   };
 
   /**
@@ -549,11 +589,11 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * @returns Expiration timestamp in Unix seconds.
    */
   private makeExpiresAt = (nowSec: number): number => {
-    const ttlSeconds = this.options?.ttlSeconds;
+    const ttlSeconds = this.options.ttlSeconds;
     if (ttlSeconds !== undefined) {
       return nowSec + ttlSeconds;
     }
-    return nowSec + (this.options?.ttlDays ?? DEFAULT_TTL_DAYS) * 24 * 60 * 60;
+    return nowSec + (this.options.ttlDays ?? DEFAULT_TTL_DAYS) * SECONDS_PER_DAY;
   };
 
   /**
@@ -564,7 +604,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * @throws {DynamodbRefreshTokenProviderValidateError} When `tokenBytes` is not a positive integer.
    */
   private resolveTokenBytes = (tokenBytes?: number): number => {
-    const bytes = tokenBytes ?? DEFAULT_TOKEN_BYTES;
+    const bytes = tokenBytes ?? DEFAULT_RANDOM_TOKEN_BYTES;
     if (!Number.isInteger(bytes) || bytes < 1) {
       throw new DynamodbRefreshTokenProviderValidateError('tokenBytes must be a positive integer');
     }
@@ -593,7 +633,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * @throws {@link DynamodbRefreshTokenProviderInvalidError} When validation fails.
    */
   private validateRefreshToken = (token: string): void => {
-    if (!token || token.length !== Math.ceil(this.tokenBytes * 8 / 6)) {
+    if (!token || token.length !== base64UrlLength(this.tokenBytes)) {
       throw new DynamodbRefreshTokenProviderInvalidError();
     }
   };
