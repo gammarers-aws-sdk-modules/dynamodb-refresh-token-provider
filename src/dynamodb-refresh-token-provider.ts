@@ -110,7 +110,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * Creates a provider for the refresh-token table.
    *
    * @param options - Table name, optional region, and {@link StoreOptions}.
-   * @throws {DynamodbRefreshTokenProviderValidateError} When `tokenBytes`, `ttlSeconds`, or `ttlDays` is invalid,
+   * @throws {@link DynamodbRefreshTokenProviderValidateError} When `tokenBytes`, `ttlSeconds`, or `ttlDays` is invalid,
    *   or when `documentClient` and `clientConfig` are both set.
    */
   constructor(options: DynamodbRefreshTokenProviderOptions);
@@ -121,7 +121,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * @param tableName - DynamoDB table name for refresh token items.
    * @param region - AWS region used when this class constructs the DynamoDB client.
    * @param options - Token lifetime, PK prefix, GSI names, reuse revocation, client injection, or custom endpoint.
-   * @throws {DynamodbRefreshTokenProviderValidateError} When `tokenBytes`, `ttlSeconds`, or `ttlDays` is invalid,
+   * @throws {@link DynamodbRefreshTokenProviderValidateError} When `tokenBytes`, `ttlSeconds`, or `ttlDays` is invalid,
    *   or when `documentClient` and `clientConfig` are both set.
    */
   constructor(tableName: string, region: string, options?: StoreOptions);
@@ -190,7 +190,8 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    *
    * @param params - Client refresh token and optional clock (`now`).
    * @returns Subject, session, new plaintext token, and new expiration.
-   * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token format is invalid or no row exists.
+   * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token format is invalid, no row exists,
+   *   or the stored row lacks required fields or has unexpected attribute types.
    * @throws {@link DynamodbRefreshTokenProviderExpiredError} When `expiresAt` is not after `now`.
    * @throws {@link DynamodbRefreshTokenProviderRevokedError} When the token row has `revokedAt` set.
    * @throws {@link DynamodbRefreshTokenProviderReusedError} When the token was already rotated, or the
@@ -524,7 +525,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * Rejects combining an injected document client with client construction config.
    *
    * @param options - Store options from the constructor.
-   * @throws {DynamodbRefreshTokenProviderValidateError} When `documentClient` and `clientConfig` are both set.
+   * @throws {@link DynamodbRefreshTokenProviderValidateError} When `documentClient` and `clientConfig` are both set.
    */
   private validateClientOptions = (options?: StoreOptions): void => {
     if (options?.documentClient !== undefined && options.clientConfig !== undefined) {
@@ -601,7 +602,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    *
    * @param tokenBytes - Optional byte length from store options.
    * @returns Positive integer byte length.
-   * @throws {DynamodbRefreshTokenProviderValidateError} When `tokenBytes` is not a positive integer.
+   * @throws {@link DynamodbRefreshTokenProviderValidateError} When `tokenBytes` is not a positive integer.
    */
   private resolveTokenBytes = (tokenBytes?: number): number => {
     const bytes = tokenBytes ?? DEFAULT_RANDOM_TOKEN_BYTES;
@@ -615,7 +616,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * Validates TTL-related store options at construction time.
    *
    * @param options - Store options from the constructor.
-   * @throws {DynamodbRefreshTokenProviderValidateError} When `ttlSeconds` or `ttlDays` is not a positive number.
+   * @throws {@link DynamodbRefreshTokenProviderValidateError} When `ttlSeconds` or `ttlDays` is not a positive number.
    */
   private validateTtlOptions = (options?: StoreOptions): void => {
     if (options?.ttlSeconds !== undefined && options.ttlSeconds <= 0) {

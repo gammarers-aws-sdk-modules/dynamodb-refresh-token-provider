@@ -30,7 +30,8 @@ export class DynamodbRefreshTokenProviderValidateError extends DynamodbRefreshTo
 }
 
 /**
- * Thrown when the refresh token is missing, malformed, or not recognized.
+ * Thrown when the refresh token is missing, malformed, or not recognized, or when its stored row
+ * lacks required fields or has unexpected attribute types.
  */
 export class DynamodbRefreshTokenProviderInvalidError extends DynamodbRefreshTokenProviderError {
   override readonly name: string = 'DynamodbRefreshTokenProviderInvalidError';

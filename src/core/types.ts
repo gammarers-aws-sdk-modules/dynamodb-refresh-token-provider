@@ -15,7 +15,9 @@ export type DocumentClientTranslateConfig = {
 };
 
 /**
- * Configuration for the DynamoDB refresh token provider constructor.
+ * Store configuration for the DynamoDB refresh token provider.
+ * Included in {@link DynamodbRefreshTokenProviderOptions}; also the third argument of the deprecated
+ * positional constructor.
  *
  * Token lifetime (`ttlDays` or `ttlSeconds`) drives both logical expiration (`expiresAt`) and the
  * DynamoDB TTL attribute (`ttl`) written on Put / Transact. When both are set, `ttlSeconds` takes
@@ -242,7 +244,7 @@ export type TokenRecord = {
 };
 
 /**
- * Persistence abstraction for opaque refresh tokens: issue, rotate, revoke, and session revoke.
+ * Persistence abstraction for opaque refresh tokens: issue, rotate, revoke, session revoke, and subject revoke.
  */
 export interface RefreshTokenStore {
   /**
@@ -261,7 +263,8 @@ export interface RefreshTokenStore {
    *
    * @param params - Current token and optional clock.
    * @returns Subject, session, new token, and new expiration.
-   * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token is invalid or no row exists.
+   * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token is invalid, no row exists, or the
+   *   stored row is malformed.
    * @throws {@link DynamodbRefreshTokenProviderExpiredError} When `expiresAt` is not after `now`.
    * @throws {@link DynamodbRefreshTokenProviderRevokedError} When the row has `revokedAt` set.
    * @throws {@link DynamodbRefreshTokenProviderReusedError} When the token was already rotated, or the current
