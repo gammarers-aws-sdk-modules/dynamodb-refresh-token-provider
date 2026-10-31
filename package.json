@@ -32,7 +32,7 @@
     "organization": false
   },
   "devDependencies": {
-    "@gammarers/projen-projects": "^0.5.1",
+    "@gammarers/projen-projects": "^0.6.2",
     "@stylistic/eslint-plugin": "^2",
     "@types/jest": "^30.0.0",
     "@types/node": "^20",

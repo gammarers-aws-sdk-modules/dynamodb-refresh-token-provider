@@ -8,7 +8,7 @@ const project = new ProjenTypeScriptProject({
     '@aws-sdk/lib-dynamodb@^3.777.0',
   ],
   devDeps: [
-    '@gammarers/projen-projects@^0.5.1',
+    '@gammarers/projen-projects@^0.6.2',
   ],
   releaseToNpm: true,
   npmTrustedPublishing: true,
