@@ -223,7 +223,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
       throw new DynamodbRefreshTokenProviderRevokedError();
     }
     if (current.rotatedAt) {
-      await this.handleRefreshTokenReuse(current, now);
+      throw await this.handleRefreshTokenReuse(current, now);
     }
 
     const nextRefreshTokenExpiresAt = this.makeExpiresAt(nowSec);
@@ -271,7 +271,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
         throw error;
       }
       if (isCurrentTokenConditionFailed(error)) {
-        await this.handleRefreshTokenReuse(current, now);
+        throw await this.handleRefreshTokenReuse(current, now);
       }
       throw new DynamodbRefreshTokenProviderRotateError(undefined, { cause: error });
     }
@@ -457,14 +457,17 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
 
   /**
    * Handles refresh-token reuse detection: optionally cascades {@link DynamodbRefreshTokenProvider.revokeSession}
-   * when {@link StoreOptions.revokeSessionOnReuse} is true, then throws {@link DynamodbRefreshTokenProviderReusedError}
-   * populated with `subjectId` / `sessionId` from `current`.
+   * when {@link StoreOptions.revokeSessionOnReuse} is true, then returns {@link DynamodbRefreshTokenProviderReusedError}
+   * populated with `subjectId` / `sessionId` from `current` for the caller to throw.
    *
    * @param current - Token row that indicated reuse (`rotatedAt` set or current-token condition failed).
    * @param now - Clock used for `revokedAt` when cascading revoke is enabled.
-   * @throws {@link DynamodbRefreshTokenProviderReusedError} Always (return type is `never`).
+   * @returns Reuse error to throw.
    */
-  private handleRefreshTokenReuse = async (current: LoadedTokenRecord, now: Date): Promise<never> => {
+  private handleRefreshTokenReuse = async (
+    current: LoadedTokenRecord,
+    now: Date,
+  ): Promise<DynamodbRefreshTokenProviderReusedError> => {
     if (this.options.revokeSessionOnReuse) {
       await this.revokeSession({
         sessionId: current.sessionId,
@@ -473,7 +476,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
       });
     }
 
-    throw new DynamodbRefreshTokenProviderReusedError(undefined, {
+    return new DynamodbRefreshTokenProviderReusedError(undefined, {
       subjectId: current.subjectId,
       sessionId: current.sessionId,
     });

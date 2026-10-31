@@ -335,6 +335,7 @@ describe('DynamodbRefreshTokenProvider', () => {
       ['transaction conflict', [{ Code: 'TransactionConflict' }, { Code: 'None' }]],
       ['successor insert condition', [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }]],
       ['missing reasons', undefined],
+      ['empty reasons', []],
     ] as const)('should map %s cancellation to DynamodbRefreshTokenProviderRotateError', async (_label, reasons) => {
       const txError = transactionCanceled(reasons);
       mockSend
