@@ -16,7 +16,7 @@ TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** 
 - **Rotation safety** — marks the old row as rotated and inserts the successor in one transaction; detects reuse and conflicting updates.
 - **Session revocation (OAuth 2.0 BCP)** — `revokeSession({ sessionId })` revokes all tokens for a session via a `sessionId` GSI; optional `revokeSessionOnReuse` cascades on reuse detection.
 - **Subject revocation** — `revokeSubject({ subjectId })` revokes every token for a user across all sessions via a `subjectId` GSI (logout all devices, password change, account suspension).
-- **Structured errors** — `DynamodbRefreshTokenProviderValidateError` (invalid constructor options), `DynamodbRefreshTokenProviderInvalidError`, `DynamodbRefreshTokenProviderExpiredError`, `DynamodbRefreshTokenProviderRevokedError`, and `DynamodbRefreshTokenProviderReusedError` (with optional `subjectId` / `sessionId`). All extend `DynamodbRefreshTokenProviderError`. Check a subclass before the base.
+- **Structured errors** — `DynamodbRefreshTokenProviderValidateError` (invalid constructor options), `DynamodbRefreshTokenProviderInvalidError`, `DynamodbRefreshTokenProviderExpiredError`, `DynamodbRefreshTokenProviderRevokedError`, `DynamodbRefreshTokenProviderReusedError` (with optional `subjectId` / `sessionId`), and `DynamodbRefreshTokenProviderRotateError` (non-reuse rotate failure such as throttling or a transaction conflict; the token is not consumed and may be retried). All extend `DynamodbRefreshTokenProviderError`. Check a subclass before the base.
 - **Utilities** — `sha256Hex` and `randomToken` for hashing and token generation aligned with the store.
 - **Injectable DynamoDB client** — pass an existing `DynamoDBDocumentClient`, or a `DynamoDBClientConfig` for credentials, retries, and request handlers.
 
@@ -42,7 +42,7 @@ pnpm add dynamodb-refresh-token-provider
 
 ## Usage
 
-Create a store with your table name, AWS region, and optional `StoreOptions`. Your DynamoDB table needs a **string partition key** named `pk`, **TTL enabled** on attribute `ttl` (see [DynamoDB TTL](#dynamodb-ttl)), a **GSI** on `sessionId` for session revocation (see [Session GSI](#session-gsi)), and a **GSI** on `subjectId` for subject-wide revocation (see [Subject GSI](#subject-gsi)).
+Create a store with an options object containing your table name and any `StoreOptions`. The AWS SDK resolves the region (for example from `AWS_REGION`, shared config, or the Lambda runtime). Your DynamoDB table needs a **string partition key** named `pk`, **TTL enabled** on attribute `ttl` (see [DynamoDB TTL](#dynamodb-ttl)), a **GSI** on `sessionId` for session revocation (see [Session GSI](#session-gsi)), and a **GSI** on `subjectId` for subject-wide revocation (see [Subject GSI](#subject-gsi)).
 
 ```typescript
 import {
@@ -51,9 +51,11 @@ import {
   DynamodbRefreshTokenProviderInvalidError,
   DynamodbRefreshTokenProviderReusedError,
   DynamodbRefreshTokenProviderRevokedError,
+  DynamodbRefreshTokenProviderRotateError,
 } from 'dynamodb-refresh-token-provider';
 
-const store = new DynamodbRefreshTokenProvider('your-refresh-token-table', 'us-east-1', {
+const store = new DynamodbRefreshTokenProvider({
+  tableName: 'your-refresh-token-table',
   ttlDays: 60,
   // ttlSeconds: 3600, // alternative to ttlDays; takes precedence when both are set
   // tokenBytes: 32,
@@ -81,14 +83,18 @@ try {
   // rotated.refreshToken, rotated.refreshTokenExpiresAt, rotated.subjectId, rotated.sessionId
 } catch (e) {
   if (e instanceof DynamodbRefreshTokenProviderReusedError) {
-    // already rotated or lost a transactional race
+    // already rotated, or a concurrent rotate/revoke won the race
     // e.sessionId / e.subjectId are set when the store row was loaded
     if (e.sessionId) {
       await store.revokeSession({ sessionId: e.sessionId, subjectId: e.subjectId });
     }
   }
+  if (e instanceof DynamodbRefreshTokenProviderRotateError) {
+    // not reuse (throttling, transaction conflict, ...); the token was not consumed
+    // retry rotate with the same token or return a retryable error; e.cause holds the SDK error
+  }
   if (e instanceof DynamodbRefreshTokenProviderInvalidError) {
-    // unknown or malformed token
+    // unknown or malformed token, or a stored row with missing or mistyped fields
   }
   if (e instanceof DynamodbRefreshTokenProviderExpiredError) {
     // past expiresAt
@@ -111,7 +117,7 @@ await store.revokeSubject({ subjectId: 'user-123' });
 
 ### DynamoDB client
 
-By default the provider builds a `DynamoDBClient` from the constructor `region` and optional `endpoint`, then wraps it with `DynamoDBDocumentClient.from`. Pass `documentClient` to reuse an existing document client, including one created from an X-Ray-wrapped client. The constructor `region` is not used to build a client when `documentClient` is set. Pass `clientConfig` to supply credentials, retries, or a request handler to the client this provider constructs. Do not set `documentClient` and `clientConfig` together.
+By default the provider builds a `DynamoDBClient` from the optional `region` and `endpoint` options, then wraps it with `DynamoDBDocumentClient.from`. When they are omitted, the AWS SDK resolves the region and the matching endpoint (including FIPS, dual-stack, and China partitions). Pass `documentClient` to reuse an existing document client, including one created from an X-Ray-wrapped client; `region` and `endpoint` are not applied in that case. Pass `clientConfig` to supply credentials, retries, or a request handler to the client this provider constructs. Do not set `documentClient` and `clientConfig` together.
 
 ```typescript
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -119,14 +125,16 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { DynamodbRefreshTokenProvider } from 'dynamodb-refresh-token-provider';
 
 const documentClient = DynamoDBDocumentClient.from(
-  new DynamoDBClient({ region: 'us-east-1', maxAttempts: 3 }),
+  new DynamoDBClient({ maxAttempts: 3 }),
 );
 
-const store = new DynamodbRefreshTokenProvider('your-refresh-token-table', 'us-east-1', {
+const store = new DynamodbRefreshTokenProvider({
+  tableName: 'your-refresh-token-table',
   documentClient,
 });
 
-const storeWithConfig = new DynamodbRefreshTokenProvider('your-refresh-token-table', 'us-east-1', {
+const storeWithConfig = new DynamodbRefreshTokenProvider({
+  tableName: 'your-refresh-token-table',
   clientConfig: {
     maxAttempts: 3,
   },
@@ -213,24 +221,28 @@ aws dynamodb update-table \
 
 ## Options
 
-Constructor: `new DynamodbRefreshTokenProvider(tableName, region, options?)`.
+Constructor: `new DynamodbRefreshTokenProvider(options)` with `DynamodbRefreshTokenProviderOptions` (`tableName` plus every `StoreOptions` field).
 
 Invalid `tokenBytes`, `ttlSeconds`, or `ttlDays`, or setting both `documentClient` and `clientConfig`, throws `DynamodbRefreshTokenProviderValidateError`.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
+| `tableName` | `string` | (required) | DynamoDB table name for refresh token items. |
+| `region` | `string` | (resolved by the AWS SDK) | AWS region for the client this provider constructs. Overridden by `clientConfig.region` when both are set. Ignored when `documentClient` is set. |
 | `ttlDays` | `number` | `60` | Token lifetime in days; added to `now` when computing `expiresAt` and `ttl` (Unix seconds). Ignored when `ttlSeconds` is set. |
 | `ttlSeconds` | `number` | (none) | Token lifetime in seconds; takes precedence over `ttlDays` when both are set. |
 | `tokenBytes` | `number` | `32` | Random byte length for generated refresh tokens (e.g. `32` → 256-bit). |
 | `translateConfig` | `DocumentClientTranslateConfig` | (none) | Pass-through to `DynamoDBDocumentClient.from` (e.g. `marshallOptions.removeUndefinedValues`). Ignored when `documentClient` is set. |
 | `pkPrefix` | `string` | `'rt#'` | Partition key prefix; full `pk` is `prefix` + SHA-256 hex of the plaintext token. |
 | `consistentRead` | `boolean` | `true` | Use strongly consistent reads on `GetItem` when loading a token row. |
-| `endpoint` | `string` | (none) | Custom DynamoDB API endpoint (e.g. LocalStack or DynamoDB Local). Ignored when `documentClient` is set. Overridden by `clientConfig.endpoint` when both are set. |
-| `documentClient` | `DynamoDBDocumentClient` | (none) | Existing document client. When set, the provider does not construct a client. `clientConfig`, `endpoint`, and `translateConfig` are not applied. Mutually exclusive with `clientConfig`. |
+| `endpoint` | `string` | (resolved by the AWS SDK) | Custom DynamoDB API endpoint (e.g. LocalStack or DynamoDB Local). Ignored when `documentClient` is set. Overridden by `clientConfig.endpoint` when both are set. |
+| `documentClient` | `DynamoDBDocumentClient` | (none) | Existing document client. When set, the provider does not construct a client. `clientConfig`, `region`, `endpoint`, and `translateConfig` are not applied. Mutually exclusive with `clientConfig`. |
 | `clientConfig` | `DynamoDBClientConfig` | (none) | Passed to `new DynamoDBClient` after `region` and `endpoint`. Fields here override those. Mutually exclusive with `documentClient`. |
 | `sessionIdIndexName` | `string` | `'sessionId-index'` | GSI name whose partition key is `sessionId` (required for `revokeSession`). |
 | `subjectIdIndexName` | `string` | `'subjectId-index'` | GSI name whose partition key is `subjectId` (required for `revokeSubject`). |
 | `revokeSessionOnReuse` | `boolean` | `false` | When true, `rotate` calls `revokeSession` for the token’s session before throwing `DynamodbRefreshTokenProviderReusedError`. |
+
+The positional form `new DynamodbRefreshTokenProvider(tableName, region, options?)` still works but is deprecated.
 
 `issue`, `rotate`, `revoke`, `revokeSession`, and `revokeSubject` accept an optional `now?: Date` for testing or clock injection.
 
@@ -242,4 +254,4 @@ Invalid `tokenBytes`, `ttlSeconds`, or `ttlDays`, or setting both `documentClien
 
 ## License
 
-This project is licensed under the Apache-2.0 License.
+This project is licensed under the (Apache-2.0) License.

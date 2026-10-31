@@ -15,7 +15,9 @@ export type DocumentClientTranslateConfig = {
 };
 
 /**
- * Configuration for the DynamoDB refresh token provider constructor.
+ * Store configuration for the DynamoDB refresh token provider.
+ * Included in {@link DynamodbRefreshTokenProviderOptions}; also the third argument of the deprecated
+ * positional constructor.
  *
  * Token lifetime (`ttlDays` or `ttlSeconds`) drives both logical expiration (`expiresAt`) and the
  * DynamoDB TTL attribute (`ttl`) written on Put / Transact. When both are set, `ttlSeconds` takes
@@ -65,6 +67,7 @@ export type StoreOptions = {
 
   /**
    * Custom DynamoDB API endpoint (e.g. LocalStack or DynamoDB Local).
+   * When omitted, the AWS SDK resolves the endpoint for the region (including FIPS, dual-stack, and China partitions).
    * Applied when this provider constructs the client. Ignored when {@link StoreOptions.documentClient} is set.
    * Overridden by `endpoint` on {@link StoreOptions.clientConfig} when both are set.
    */
@@ -73,15 +76,15 @@ export type StoreOptions = {
   /**
    * Existing document client. Commands are sent through this client.
    * The provider does not construct `DynamoDBClient` or call `DynamoDBDocumentClient.from`.
-   * `clientConfig`, `endpoint`, and `translateConfig` are not applied, and the constructor
-   * `region` is not used to build a client. Mutually exclusive with {@link StoreOptions.clientConfig}.
+   * `clientConfig`, `endpoint`, `translateConfig`, and `region` are not applied.
+   * Mutually exclusive with {@link StoreOptions.clientConfig}.
    * Use this to share a client, including one created from an X-Ray-wrapped `DynamoDBClient`.
    */
   documentClient?: DynamoDBDocumentClient;
 
   /**
    * Config for the internally constructed `DynamoDBClient` (credentials, retries, request handler, and so on).
-   * The constructor `region` and {@link StoreOptions.endpoint} are the base; fields on this object override them.
+   * `region` and {@link StoreOptions.endpoint} are the base; fields on this object override them.
    * Mutually exclusive with {@link StoreOptions.documentClient}.
    */
   clientConfig?: DynamoDBClientConfig;
@@ -109,6 +112,23 @@ export type StoreOptions = {
    * @defaultValue false
    */
   revokeSessionOnReuse?: boolean;
+};
+
+/**
+ * Options for the recommended {@link DynamodbRefreshTokenProvider} constructor form:
+ * the table name plus every {@link StoreOptions} field.
+ */
+export type DynamodbRefreshTokenProviderOptions = StoreOptions & {
+  /** DynamoDB table name for refresh token items. */
+  tableName: string;
+
+  /**
+   * AWS region for the client this provider constructs.
+   * When omitted, the AWS SDK resolves it (e.g. `AWS_REGION`, shared config, or the Lambda runtime).
+   * Overridden by `region` on {@link StoreOptions.clientConfig} when both are set.
+   * Ignored when {@link StoreOptions.documentClient} is set.
+   */
+  region?: string;
 };
 
 /** Parameters for {@link RefreshTokenStore.issue}. */
@@ -224,7 +244,7 @@ export type TokenRecord = {
 };
 
 /**
- * Persistence abstraction for opaque refresh tokens: issue, rotate, revoke, and session revoke.
+ * Persistence abstraction for opaque refresh tokens: issue, rotate, revoke, session revoke, and subject revoke.
  */
 export interface RefreshTokenStore {
   /**
@@ -243,11 +263,14 @@ export interface RefreshTokenStore {
    *
    * @param params - Current token and optional clock.
    * @returns Subject, session, new token, and new expiration.
-   * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token is invalid or no row exists.
+   * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token is invalid, no row exists, or the
+   *   stored row is malformed.
    * @throws {@link DynamodbRefreshTokenProviderExpiredError} When `expiresAt` is not after `now`.
    * @throws {@link DynamodbRefreshTokenProviderRevokedError} When the row has `revokedAt` set.
-   * @throws {@link DynamodbRefreshTokenProviderReusedError} When the token was already rotated or the transaction
-   *   failed conditionally. May include `subjectId` / `sessionId` from the store row.
+   * @throws {@link DynamodbRefreshTokenProviderReusedError} When the token was already rotated, or the current
+   *   token's condition failed during rotation. May include `subjectId` / `sessionId` from the store row.
+   * @throws {@link DynamodbRefreshTokenProviderRotateError} When rotation failed for a reason other than
+   *   reuse (e.g. throttling or a transaction conflict). The token is not consumed and may be retried.
    */
   rotate(params: RotateParams): Promise<RotateResult>;
 

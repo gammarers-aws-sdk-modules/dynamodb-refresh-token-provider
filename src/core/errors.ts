@@ -30,7 +30,8 @@ export class DynamodbRefreshTokenProviderValidateError extends DynamodbRefreshTo
 }
 
 /**
- * Thrown when the refresh token is missing, malformed, or not recognized.
+ * Thrown when the refresh token is missing, malformed, or not recognized, or when its stored row
+ * lacks required fields or has unexpected attribute types.
  */
 export class DynamodbRefreshTokenProviderInvalidError extends DynamodbRefreshTokenProviderError {
   override readonly name: string = 'DynamodbRefreshTokenProviderInvalidError';
@@ -89,7 +90,8 @@ export type DynamodbRefreshTokenProviderReusedErrorContext = {
 
 /**
  * Thrown when a refresh token is presented after it has already been rotated (reuse detection),
- * or when a rotate transaction is canceled under reuse-safe conditions.
+ * or when the rotate transaction is canceled because the current token's condition failed
+ * (a concurrent rotate or revoke won the race).
  *
  * When `subjectId` / `sessionId` are present, callers can revoke the whole session
  * (e.g. via {@link RefreshTokenStore.revokeSession}) per OAuth 2.0 BCP family revocation.
@@ -121,20 +123,40 @@ export class DynamodbRefreshTokenProviderReusedError extends DynamodbRefreshToke
 }
 
 /**
- * Rotation failed for a reason other than reuse (for example a transient store failure).
- * {@link DynamodbRefreshTokenProvider.rotate} does not throw this class.
- * Other rotation failures propagate as the original error.
+ * Optional details attached when a rotate transaction is canceled for a reason other than reuse.
  */
-export class DynamodbRefreshTokenProviderRotateFailedError extends DynamodbRefreshTokenProviderError {
-  override readonly name: string = 'DynamodbRefreshTokenProviderRotateFailedError';
+export type DynamodbRefreshTokenProviderRotateErrorOptions = {
+  /** Original error from the store (e.g. `TransactionCanceledException`). */
+  cause?: unknown;
+};
+
+/**
+ * Thrown by {@link DynamodbRefreshTokenProvider.rotate} when the rotate transaction is canceled
+ * for a reason other than reuse (for example throttling, a transaction conflict, or a failed
+ * successor insert). Reuse is reported separately as {@link DynamodbRefreshTokenProviderReusedError},
+ * which does not extend this class.
+ *
+ * The transaction is rolled back, so the presented refresh token is not consumed and the
+ * caller may retry `rotate` with the same token. Session revocation is never triggered.
+ * Failures that are not transaction cancellations (e.g. network errors) propagate as the
+ * original SDK error.
+ */
+export class DynamodbRefreshTokenProviderRotateError extends DynamodbRefreshTokenProviderError {
+  override readonly name: string = 'DynamodbRefreshTokenProviderRotateError';
+
+  /** Original error from the store, when known. */
+  readonly cause?: unknown;
 
   /**
    * @param message - Human-readable error description.
+   * @param options - Original store error for diagnostics.
    */
   constructor(
     message = 'The refresh token could not be rotated. Please try signing in again.',
+    options?: DynamodbRefreshTokenProviderRotateErrorOptions,
   ) {
     super(message);
-    Object.setPrototypeOf(this, DynamodbRefreshTokenProviderRotateFailedError.prototype);
+    Object.setPrototypeOf(this, DynamodbRefreshTokenProviderRotateError.prototype);
+    this.cause = options?.cause;
   }
 }
