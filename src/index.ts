@@ -2,7 +2,9 @@
  * Public API: refresh token store types, DynamoDB-backed implementation, structured errors, and crypto helpers.
  *
  * Enable DynamoDB TTL on attribute `ttl`, and GSIs on `sessionId` and `subjectId` for bulk
- * revocation, when using {@link DynamodbRefreshTokenProvider}.
+ * revocation, when using {@link DynamodbRefreshTokenProvider}. Session and subject marker rows
+ * (`sess#`, `sub#`) are the strongly consistent revocation authority; those GSI sweeps stamp
+ * token rows the index has already caught up to.
  */
 export type {
   RefreshTokenStore,

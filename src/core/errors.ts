@@ -63,7 +63,10 @@ export class DynamodbRefreshTokenProviderExpiredError extends DynamodbRefreshTok
 }
 
 /**
- * Thrown when the refresh token has been explicitly revoked.
+ * Thrown when the refresh token, its session, or its subject generation has been revoked.
+ *
+ * {@link DynamodbRefreshTokenProvider.issue} throws this when the session, or the
+ * session-subject pair, is already revoked, so no new token row is written.
  */
 export class DynamodbRefreshTokenProviderRevokedError extends DynamodbRefreshTokenProviderError {
   override readonly name: string = 'DynamodbRefreshTokenProviderRevokedError';

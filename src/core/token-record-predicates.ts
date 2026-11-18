@@ -7,16 +7,16 @@ import type { TokenRecord } from './types';
  */
 export type LoadedTokenRecord = Pick<
   TokenRecord,
-'pk' | 'subjectId' | 'sessionId' | 'expiresAt' | 'rotatedAt' | 'revokedAt'
+'pk' | 'subjectId' | 'sessionId' | 'expiresAt' | 'rotatedAt' | 'revokedAt' | 'subjectGeneration'
 >;
 
 /**
- * Whether `value` is absent, `null`, or a number (shape of optional epoch attributes such as `rotatedAt`).
+ * Whether `value` is absent, `null`, or a number.
  *
  * @param value - Attribute value read from DynamoDB.
  * @returns `true` when the value is `undefined`, `null`, or a number.
  */
-const isOptionalEpochSec = (value: unknown): boolean =>
+const isOptionalNumber = (value: unknown): boolean =>
   value === undefined || value === null || typeof value === 'number';
 
 /**
@@ -24,12 +24,13 @@ const isOptionalEpochSec = (value: unknown): boolean =>
  *
  * @param item - Item returned by `GetItem` (unmarshalled).
  * @returns `true` when `pk`, `subjectId`, and `sessionId` are strings, `expiresAt` is a number,
- *   and `rotatedAt` / `revokedAt` are absent, `null`, or numbers.
+ *   and `rotatedAt`, `revokedAt`, and `subjectGeneration` are absent, `null`, or numbers.
  */
 export const isLoadedTokenRecord = (item: Record<string, unknown>): item is LoadedTokenRecord =>
   typeof item.pk === 'string'
   && typeof item.subjectId === 'string'
   && typeof item.sessionId === 'string'
   && typeof item.expiresAt === 'number'
-  && isOptionalEpochSec(item.rotatedAt)
-  && isOptionalEpochSec(item.revokedAt);
+  && isOptionalNumber(item.rotatedAt)
+  && isOptionalNumber(item.revokedAt)
+  && isOptionalNumber(item.subjectGeneration);
