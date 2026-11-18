@@ -246,7 +246,7 @@ Invalid `tokenBytes`, `ttlSeconds`, or `ttlDays`, or setting both `documentClien
 | `tokenBytes` | `number` | `32` | Random byte length for generated refresh tokens (e.g. `32` → 256-bit). |
 | `translateConfig` | `DocumentClientTranslateConfig` | (none) | Pass-through to `DynamoDBDocumentClient.from` (e.g. `marshallOptions.removeUndefinedValues`). Ignored when `documentClient` is set. |
 | `pkPrefix` | `string` | `'rt#'` | Partition key prefix; full `pk` is `prefix` + SHA-256 hex of the plaintext token. |
-| `consistentRead` | `boolean` | `true` | Use strongly consistent reads on `GetItem` when loading a token row. |
+| `consistentRead` | `boolean` | `true` | Use strongly consistent reads on every `GetItem`, including token rows and revocation marker rows (`sess#…`, `sub#…`). Transaction `ConditionCheck`s stay strongly consistent when this is `false`. |
 | `endpoint` | `string` | (resolved by the AWS SDK) | Custom DynamoDB API endpoint (e.g. LocalStack or DynamoDB Local). Ignored when `documentClient` is set. Overridden by `clientConfig.endpoint` when both are set. |
 | `documentClient` | `DynamoDBDocumentClient` | (none) | Existing document client. When set, the provider does not construct a client. `clientConfig`, `region`, `endpoint`, and `translateConfig` are not applied. Mutually exclusive with `clientConfig`. |
 | `clientConfig` | `DynamoDBClientConfig` | (none) | Passed to `new DynamoDBClient` after `region` and `endpoint`. Fields here override those. Mutually exclusive with `documentClient`. |
