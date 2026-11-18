@@ -134,6 +134,41 @@ export type DynamodbRefreshTokenProviderRotateErrorOptions = {
 };
 
 /**
+ * Optional details attached when the caller cancels an operation with `AbortSignal`.
+ */
+export type DynamodbRefreshTokenProviderAbortErrorOptions = {
+  /** Original failure from the aborted request, or the signal's abort reason when no request was sent. */
+  cause?: unknown;
+};
+
+/**
+ * Thrown when an operation's `abortSignal` is aborted.
+ *
+ * Marker writes and token `revokedAt` updates that already succeeded stay.
+ * {@link RefreshTokenStore.revokeSession} and {@link RefreshTokenStore.revokeSubject}
+ * do not return `revokedCount` after this error.
+ */
+export class DynamodbRefreshTokenProviderAbortError extends DynamodbRefreshTokenProviderError {
+  override readonly name: string = 'DynamodbRefreshTokenProviderAbortError';
+
+  /** Original failure or abort reason, when known. */
+  readonly cause?: unknown;
+
+  /**
+   * @param message - Human-readable error description.
+   * @param options - Original failure or abort reason for diagnostics.
+   */
+  constructor(
+    message = 'The operation was aborted.',
+    options?: DynamodbRefreshTokenProviderAbortErrorOptions,
+  ) {
+    super(message);
+    Object.setPrototypeOf(this, DynamodbRefreshTokenProviderAbortError.prototype);
+    this.cause = options?.cause;
+  }
+}
+
+/**
  * Thrown by {@link DynamodbRefreshTokenProvider.rotate} when the rotate transaction is canceled
  * for a reason other than reuse (for example throttling, a transaction conflict, or a failed
  * successor insert). Reuse is reported separately as {@link DynamodbRefreshTokenProviderReusedError},

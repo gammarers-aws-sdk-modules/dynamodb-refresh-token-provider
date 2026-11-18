@@ -10,6 +10,7 @@ import {
 import { NodeHttpHandler } from '@smithy/node-http-handler';
 
 import {
+  DynamodbRefreshTokenProviderAbortError,
   DynamodbRefreshTokenProviderExpiredError,
   DynamodbRefreshTokenProviderInvalidError,
   DynamodbRefreshTokenProviderReusedError,
@@ -230,24 +231,29 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * A revoked session or session-subject pair is rejected. A prior `revokeSubject` does not
    * reject `issue`; the new token stores the generation that revocation advanced to.
    *
-   * @param params - Subject, session, and optional clock (`now`).
+   * @param params - Subject, session, optional clock (`now`), and optional `abortSignal`.
    * @returns Plaintext refresh token and expiration as Unix seconds.
    * @throws {@link DynamodbRefreshTokenProviderRevokedError} When the session or the session-subject pair is revoked,
    *   including when that revocation wins the race inside the transaction.
    * @throws {@link DynamodbRefreshTokenProviderInvalidError} When a revocation marker has an unexpected attribute type.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `params.abortSignal` is aborted.
    */
   public issue = async (params: IssueParams): Promise<IssueResult> => {
     const now = params.now ?? new Date();
     const nowSec = epochSec(now);
     const expiresAt = this.makeExpiresAt(nowSec);
-    const generation = await this.requireIssuableSession(params.sessionId, params.subjectId);
+    const generation = await this.requireIssuableSession(
+      params.sessionId,
+      params.subjectId,
+      params.abortSignal,
+    );
 
     const refreshToken = randomToken(this.tokenBytes);
     const hash = sha256Hex(refreshToken);
     const pk = this.getPrimaryKey(hash);
 
     try {
-      await this.getDdb().send(new TransactWriteCommand({
+      await this.sendCommand(new TransactWriteCommand({
         TransactItems: [
           ...this.familyConditionChecks(params.sessionId, params.subjectId, generation),
           {
@@ -266,7 +272,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
             },
           },
         ],
-      }));
+      }), params.abortSignal);
     } catch (error: unknown) {
       if (isRevocationConditionFailed(error, ISSUE_REVOCATION_ITEM_INDEXES)) {
         throw new DynamodbRefreshTokenProviderRevokedError();
@@ -290,7 +296,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * the same `sessionId` and `subjectId` are revoked via {@link DynamodbRefreshTokenProvider.revokeSession}
    * before throwing.
    *
-   * @param params - Client refresh token and optional clock (`now`).
+   * @param params - Client refresh token, optional clock (`now`), and optional `abortSignal`.
    * @returns Subject, session, new plaintext token, and new expiration.
    * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token format is invalid, no row exists,
    *   or the stored row lacks required fields or has unexpected attribute types.
@@ -303,12 +309,12 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    *   and no revocation marker condition failed. Includes `subjectId` and `sessionId` from the loaded row.
    * @throws {@link DynamodbRefreshTokenProviderRotateError} When the transaction was canceled for any
    *   other reason (throttling, transaction conflict, successor insert failure). The token is not consumed.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `params.abortSignal` is aborted, including during
+   *   a reuse cascade into {@link DynamodbRefreshTokenProvider.revokeSession}.
    */
   public rotate = async (params: RotateParams): Promise<RotateResult> => {
     // validate refresh token
     this.validateRefreshToken(params.refreshToken);
-
-    const ddb = this.getDdb();
 
     const now = params.now ?? new Date();
     const nowSec = epochSec(now);
@@ -316,7 +322,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
     const currentHash = sha256Hex(params.refreshToken);
     const currentPk = this.getPrimaryKey(currentHash);
 
-    const current = await this.getTokenRecord(currentPk);
+    const current = await this.getTokenRecord(currentPk, params.abortSignal);
     if (!current) {
       throw new DynamodbRefreshTokenProviderInvalidError();
     }
@@ -328,9 +334,14 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
     }
 
     const generation = tokenSubjectGeneration(current.subjectGeneration);
-    await this.requireCurrentFamily(current.sessionId, current.subjectId, generation);
+    await this.requireCurrentFamily(
+      current.sessionId,
+      current.subjectId,
+      generation,
+      params.abortSignal,
+    );
     if (current.rotatedAt) {
-      throw await this.handleRefreshTokenReuse(current, now);
+      throw await this.handleRefreshTokenReuse(current, now, params.abortSignal);
     }
 
     const nextRefreshTokenExpiresAt = this.makeExpiresAt(nowSec);
@@ -339,7 +350,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
     const nextPk = this.getPrimaryKey(nextHash);
 
     try {
-      await ddb.send(new TransactWriteCommand({
+      await this.sendCommand(new TransactWriteCommand({
         TransactItems: [
           {
             Update: {
@@ -374,7 +385,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
           },
           ...this.familyConditionChecks(current.sessionId, current.subjectId, generation),
         ],
-      }));
+      }), params.abortSignal);
     } catch (error: unknown) {
       if (!isTransactionCanceled(error)) {
         throw error;
@@ -383,7 +394,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
         throw new DynamodbRefreshTokenProviderRevokedError();
       }
       if (isConditionFailedAt(error, ROTATE_CURRENT_TOKEN_ITEM_INDEX)) {
-        throw await this.handleRefreshTokenReuse(current, now);
+        throw await this.handleRefreshTokenReuse(current, now, params.abortSignal);
       }
       throw new DynamodbRefreshTokenProviderRotateError(undefined, { cause: error });
     }
@@ -401,15 +412,14 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    *
    * Does not update `ttl`; existing `ttl` from issue/rotate still applies for DynamoDB cleanup.
    *
-   * @param params - Refresh token and optional clock (`now`).
+   * @param params - Refresh token, optional clock (`now`), and optional `abortSignal`.
    * @returns `true` after a successful update or no-op when the item is absent.
    * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token string format is invalid.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `params.abortSignal` is aborted.
    */
   public revoke = async (params: RevokeParams): Promise<true> => {
     // validate refresh token
     this.validateRefreshToken(params.refreshToken);
-
-    const ddb = this.getDdb();
 
     const now = params.now ?? new Date();
     const nowSec = epochSec(now);
@@ -418,7 +428,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
     const pk = this.getPrimaryKey(hash);
 
     try {
-      await ddb.send(
+      await this.sendCommand(
         new UpdateCommand({
           TableName: this.tableName,
           Key: { pk },
@@ -428,6 +438,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
             ':now': nowSec,
           },
         }),
+        params.abortSignal,
       );
     } catch (error: unknown) {
       // Missing item: treat as success (idempotent revoke).
@@ -451,8 +462,10 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * When `subjectId` is set, it is required in each token `UpdateItem` condition.
    * Missing or non-matching token items are skipped (idempotent). Paginate with `LastEvaluatedKey`.
    *
-   * @param params - Session id, optional subject filter, and optional clock.
+   * @param params - Session id, optional subject filter, optional clock, and optional `abortSignal`.
    * @returns Count of token rows updated with `revokedAt` in this call.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `params.abortSignal` is aborted.
+   *   Writes that already succeeded stay, and `revokedCount` is not returned.
    */
   public revokeSession = async (params: RevokeSessionParams): Promise<RevokeSessionResult> => {
     const now = params.now ?? new Date();
@@ -460,7 +473,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
     const markerPk = params.subjectId
       ? sessionSubjectMarkerPk(params.sessionId, params.subjectId)
       : sessionMarkerPk(params.sessionId);
-    await this.writeRevokedMarker(markerPk, nowSec);
+    await this.writeRevokedMarker(markerPk, nowSec, params.abortSignal);
 
     const indexName = this.options.sessionIdIndexName ?? DEFAULT_SESSION_ID_INDEX_NAME;
 
@@ -477,6 +490,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
       updateExpressionAttributeValues: params.subjectId
         ? { ':subjectId': params.subjectId }
         : undefined,
+      abortSignal: params.abortSignal,
     });
 
     return { revokedCount };
@@ -492,13 +506,15 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    *
    * Missing token items are skipped (idempotent). Paginate with `LastEvaluatedKey`.
    *
-   * @param params - Subject id and optional clock.
+   * @param params - Subject id, optional clock, and optional `abortSignal`.
    * @returns Count of token rows updated with `revokedAt` in this call.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `params.abortSignal` is aborted.
+   *   Writes that already succeeded stay, and `revokedCount` is not returned.
    */
   public revokeSubject = async (params: RevokeSubjectParams): Promise<RevokeSubjectResult> => {
     const now = params.now ?? new Date();
     const nowSec = epochSec(now);
-    await this.incrementSubjectGeneration(params.subjectId);
+    await this.incrementSubjectGeneration(params.subjectId, params.abortSignal);
 
     const indexName = this.options.subjectIdIndexName ?? DEFAULT_SUBJECT_ID_INDEX_NAME;
 
@@ -510,6 +526,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
       },
       nowSec,
       updateConditionExpression: ITEM_EXISTS_CONDITION,
+      abortSignal: params.abortSignal,
     });
 
     return { revokedCount };
@@ -518,7 +535,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   /**
    * Queries a GSI and sets `revokedAt` on each matching base-table row.
    *
-   * @param params - GSI query parameters and per-row update conditions.
+   * @param params - GSI query parameters, per-row update conditions, and the operation `abortSignal`.
    * @returns Count of rows updated with `revokedAt` in this call.
    */
   private revokeTokenRowsByIndexQuery = async (params: {
@@ -528,14 +545,13 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
     nowSec: number;
     updateConditionExpression: string;
     updateExpressionAttributeValues?: Record<string, string>;
+    abortSignal?: AbortSignal;
   }): Promise<number> => {
-    const ddb = this.getDdb();
-
     let revokedCount = 0;
     let exclusiveStartKey: Record<string, unknown> | undefined;
 
     do {
-      const res = await ddb.send(
+      const res = await this.sendCommand(
         new QueryCommand({
           TableName: this.tableName,
           IndexName: params.indexName,
@@ -544,6 +560,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
           ProjectionExpression: 'pk',
           ExclusiveStartKey: exclusiveStartKey,
         }),
+        params.abortSignal,
       );
 
       const items = res.Items ?? [];
@@ -559,7 +576,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
         };
 
         try {
-          await ddb.send(
+          await this.sendCommand(
             new UpdateCommand({
               TableName: this.tableName,
               Key: { pk },
@@ -567,6 +584,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
               ConditionExpression: params.updateConditionExpression,
               ExpressionAttributeValues: expressionAttributeValues,
             }),
+            params.abortSignal,
           );
           revokedCount += 1;
         } catch (error: unknown) {
@@ -577,7 +595,7 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
         }
       }
 
-      exclusiveStartKey = res.LastEvaluatedKey as Record<string, unknown> | undefined;
+      exclusiveStartKey = res.LastEvaluatedKey;
     } while (hasNextPage(exclusiveStartKey));
 
     return revokedCount;
@@ -590,17 +608,20 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    *
    * @param current - Token row that indicated reuse (`rotatedAt` set or current-token condition failed).
    * @param now - Clock used for `revokedAt` when cascading revoke is enabled.
+   * @param abortSignal - Signal from the rotate call. The cascade passes it to `revokeSession`.
    * @returns Reuse error to throw.
    */
   private handleRefreshTokenReuse = async (
     current: LoadedTokenRecord,
     now: Date,
+    abortSignal?: AbortSignal,
   ): Promise<DynamodbRefreshTokenProviderReusedError> => {
     if (this.options.revokeSessionOnReuse) {
       await this.revokeSession({
         sessionId: current.sessionId,
         subjectId: current.subjectId,
         now,
+        abortSignal,
       });
     }
 
@@ -608,6 +629,65 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
       subjectId: current.subjectId,
       sessionId: current.sessionId,
     });
+  };
+
+  /**
+   * Throws when the caller has already aborted this operation.
+   *
+   * @param abortSignal - Signal from the public operation, when the caller passed one.
+   * @param cause - Failure from a request that ended after the signal aborted. When omitted, the
+   *   signal's abort reason is used.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `abortSignal` is aborted.
+   */
+  private ensureNotAborted = (abortSignal?: AbortSignal, cause?: unknown): void => {
+    if (abortSignal === undefined) {
+      return;
+    }
+    if (!abortSignal.aborted) {
+      return;
+    }
+    throw new DynamodbRefreshTokenProviderAbortError(undefined, {
+      cause: cause ?? abortSignal.reason,
+    });
+  };
+
+  /**
+   * Sends one DynamoDB command for the current operation.
+   *
+   * Checks the signal before the request and again when the request fails, so an abort is reported
+   * as {@link DynamodbRefreshTokenProviderAbortError} before other error classification.
+   *
+   * @param command - Get, query, update, or transactional write.
+   * @param abortSignal - Signal from the public operation, when the caller passed one.
+   * @returns Unmarshalled command output. Callers read `Item`, `Items`, or `LastEvaluatedKey`.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `abortSignal` is aborted.
+   */
+  private sendCommand = async (
+    command: GetCommand | QueryCommand | UpdateCommand | TransactWriteCommand,
+    abortSignal?: AbortSignal,
+  ): Promise<{
+    Item?: Record<string, unknown>;
+    Items?: Array<Record<string, unknown>>;
+    LastEvaluatedKey?: Record<string, unknown>;
+  }> => {
+    this.ensureNotAborted(abortSignal);
+    try {
+      const client = this.getDdb();
+      // send is overloaded per command, so a union of the four commands does not match one overload.
+      // This store reads Item, Items, and LastEvaluatedKey from those outputs.
+      const send = client.send.bind(client) as (
+        command: GetCommand | QueryCommand | UpdateCommand | TransactWriteCommand,
+        options?: { abortSignal?: AbortSignal },
+      ) => Promise<{
+        Item?: Record<string, unknown>;
+        Items?: Array<Record<string, unknown>>;
+        LastEvaluatedKey?: Record<string, unknown>;
+      }>;
+      return await send(command, { abortSignal });
+    } catch (error: unknown) {
+      this.ensureNotAborted(abortSignal, error);
+      throw error;
+    }
   };
 
   /**
@@ -721,14 +801,20 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    *
    * @param sessionId - Session identifier.
    * @param subjectId - Subject identifier.
+   * @param abortSignal - Signal from the public operation, when the caller passed one.
    * @returns Whether each session marker is revoked, and the subject generation.
    * @throws {@link DynamodbRefreshTokenProviderInvalidError} When a marker attribute has an unexpected type.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `abortSignal` is aborted.
    */
-  private loadFamilyMarkers = async (sessionId: string, subjectId: string): Promise<FamilyMarkers> => {
+  private loadFamilyMarkers = async (
+    sessionId: string,
+    subjectId: string,
+    abortSignal?: AbortSignal,
+  ): Promise<FamilyMarkers> => {
     const [sessionItem, pairItem, subjectItem] = await Promise.all([
-      this.getItem(sessionMarkerPk(sessionId)),
-      this.getItem(sessionSubjectMarkerPk(sessionId, subjectId)),
-      this.getItem(subjectMarkerPk(subjectId)),
+      this.getItem(sessionMarkerPk(sessionId), abortSignal),
+      this.getItem(sessionSubjectMarkerPk(sessionId, subjectId), abortSignal),
+      this.getItem(subjectMarkerPk(subjectId), abortSignal),
     ]);
 
     if (sessionItem !== undefined && !isSessionMarker(sessionItem)) {
@@ -756,12 +842,18 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    *
    * @param sessionId - Session to issue into.
    * @param subjectId - Subject to issue for.
+   * @param abortSignal - Signal from the public operation, when the caller passed one.
    * @returns Current subject generation.
    * @throws {@link DynamodbRefreshTokenProviderRevokedError} When the session or the session-subject pair is revoked.
    * @throws {@link DynamodbRefreshTokenProviderInvalidError} When a revocation marker has an unexpected attribute type.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `abortSignal` is aborted.
    */
-  private requireIssuableSession = async (sessionId: string, subjectId: string): Promise<number> => {
-    const markers = await this.loadFamilyMarkers(sessionId, subjectId);
+  private requireIssuableSession = async (
+    sessionId: string,
+    subjectId: string,
+    abortSignal?: AbortSignal,
+  ): Promise<number> => {
+    const markers = await this.loadFamilyMarkers(sessionId, subjectId, abortSignal);
     if (markers.sessionRevoked || markers.sessionSubjectRevoked) {
       throw new DynamodbRefreshTokenProviderRevokedError();
     }
@@ -774,15 +866,18 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * @param sessionId - Session on the token row.
    * @param subjectId - Subject on the token row.
    * @param tokenGeneration - Generation stored on the token. Absent means 0.
+   * @param abortSignal - Signal from the public operation, when the caller passed one.
    * @throws {@link DynamodbRefreshTokenProviderRevokedError} When the family is revoked.
    * @throws {@link DynamodbRefreshTokenProviderInvalidError} When a revocation marker has an unexpected attribute type.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `abortSignal` is aborted.
    */
   private requireCurrentFamily = async (
     sessionId: string,
     subjectId: string,
     tokenGeneration: number,
+    abortSignal?: AbortSignal,
   ): Promise<void> => {
-    const markers = await this.loadFamilyMarkers(sessionId, subjectId);
+    const markers = await this.loadFamilyMarkers(sessionId, subjectId, abortSignal);
     if (markers.sessionRevoked || markers.sessionSubjectRevoked) {
       throw new DynamodbRefreshTokenProviderRevokedError();
     }
@@ -800,16 +895,22 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    *
    * @param pk - Marker partition key.
    * @param nowSec - Revocation time as Unix seconds.
+   * @param abortSignal - Signal from the public operation, when the caller passed one.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `abortSignal` is aborted.
    */
-  private writeRevokedMarker = async (pk: string, nowSec: number): Promise<void> => {
-    await this.getDdb().send(new UpdateCommand({
+  private writeRevokedMarker = async (
+    pk: string,
+    nowSec: number,
+    abortSignal?: AbortSignal,
+  ): Promise<void> => {
+    await this.sendCommand(new UpdateCommand({
       TableName: this.tableName,
       Key: { pk },
       UpdateExpression: REVOKE_UPDATE_EXPRESSION,
       ExpressionAttributeValues: {
         ':now': nowSec,
       },
-    }));
+    }), abortSignal);
   };
 
   /**
@@ -819,9 +920,14 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * The row is not given `ttl`; it is the permanent record of how far revocation has moved.
    *
    * @param subjectId - Subject whose tokens should stop rotating.
+   * @param abortSignal - Signal from the public operation, when the caller passed one.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `abortSignal` is aborted.
    */
-  private incrementSubjectGeneration = async (subjectId: string): Promise<void> => {
-    await this.getDdb().send(new UpdateCommand({
+  private incrementSubjectGeneration = async (
+    subjectId: string,
+    abortSignal?: AbortSignal,
+  ): Promise<void> => {
+    await this.sendCommand(new UpdateCommand({
       TableName: this.tableName,
       Key: { pk: subjectMarkerPk(subjectId) },
       UpdateExpression: INCREMENT_SUBJECT_GENERATION_EXPRESSION,
@@ -829,19 +935,24 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
         ':zero': INITIAL_SUBJECT_GENERATION,
         ':one': SUBJECT_GENERATION_STEP,
       },
-    }));
+    }), abortSignal);
   };
 
   /**
    * Loads a token row by partition key.
    *
    * @param pk - Full partition key (`prefix` + hash).
+   * @param abortSignal - Signal from the public operation, when the caller passed one.
    * @returns Validated row fields, or `null` if the item does not exist.
    * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the item lacks required fields or has
    *   unexpected attribute types.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `abortSignal` is aborted.
    */
-  private getTokenRecord = async (pk: string): Promise<LoadedTokenRecord | null> => {
-    const item = await this.getItem(pk);
+  private getTokenRecord = async (
+    pk: string,
+    abortSignal?: AbortSignal,
+  ): Promise<LoadedTokenRecord | null> => {
+    const item = await this.getItem(pk, abortSignal);
     if (!item) {
       return null;
     }
@@ -855,16 +966,20 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
    * Loads one item by partition key.
    *
    * @param pk - Partition key.
+   * @param abortSignal - Signal from the public operation, when the caller passed one.
    * @returns Unmarshalled item, or `undefined` when the row is absent.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `abortSignal` is aborted.
    */
-  private getItem = async (pk: string): Promise<Record<string, unknown> | undefined> => {
-    const res = await this.getDdb().send(new GetCommand({
+  private getItem = async (
+    pk: string,
+    abortSignal?: AbortSignal,
+  ): Promise<Record<string, unknown> | undefined> => {
+    const res = await this.sendCommand(new GetCommand({
       TableName: this.tableName,
       Key: { pk },
       ConsistentRead: this.options.consistentRead ?? true,
-    }));
-    const item: Record<string, unknown> | undefined = res.Item;
-    return item;
+    }), abortSignal);
+    return res.Item;
   };
 
   /**

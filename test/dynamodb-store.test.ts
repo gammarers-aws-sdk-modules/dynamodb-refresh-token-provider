@@ -10,6 +10,7 @@ import { NodeHttpHandler } from '@smithy/node-http-handler';
 
 import {
   DynamodbRefreshTokenProvider,
+  DynamodbRefreshTokenProviderAbortError,
   DynamodbRefreshTokenProviderExpiredError,
   DynamodbRefreshTokenProviderInvalidError,
   DynamodbRefreshTokenProviderRevokedError,
@@ -1007,5 +1008,83 @@ describe('options', () => {
     await store.revokeSubject({ subjectId: 'sub' });
 
     expect(mockSend).toHaveBeenCalledTimes(14);
+  });
+});
+
+describe('abortSignal', () => {
+  it('should throw AbortError before issue sends when the signal is already aborted', async () => {
+    const controller = new AbortController();
+    const reason = new Error('stopped');
+    controller.abort(reason);
+    mockSend.mockResolvedValue({});
+
+    const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
+    const error = await store.issue({
+      subjectId: 'a',
+      sessionId: 'b',
+      now: fixedNow,
+      abortSignal: controller.signal,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(DynamodbRefreshTokenProviderAbortError);
+    expect(error).toMatchObject({ cause: reason });
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it('should wrap a failed issue transaction as AbortError when the signal aborts during the request', async () => {
+    const controller = new AbortController();
+    const cause = transactionCanceled([
+      { Code: 'ConditionalCheckFailed' },
+      { Code: 'None' },
+      { Code: 'None' },
+      { Code: 'None' },
+    ]);
+    mockSend.mockImplementation(async (command: unknown) => {
+      if (command instanceof TransactWriteCommand) {
+        controller.abort();
+        throw cause;
+      }
+      return {};
+    });
+
+    const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
+    const error = await store.issue({
+      subjectId: 'a',
+      sessionId: 'b',
+      now: fixedNow,
+      abortSignal: controller.signal,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(DynamodbRefreshTokenProviderAbortError);
+    expect(error).toMatchObject({ cause });
+    expect(mockSend.mock.calls.filter((call) => call[0] instanceof TransactWriteCommand)).toHaveLength(1);
+    expect(mockSend.mock.calls.at(-1)?.[1]).toEqual({ abortSignal: controller.signal });
+  });
+
+  it('should stop revokeSubject before the next page when the signal aborts after the first query', async () => {
+    const controller = new AbortController();
+    mockSend.mockImplementation(async (command: unknown) => {
+      if (command instanceof QueryCommand) {
+        controller.abort();
+        return {
+          Items: [{ pk: 'rt#1' }],
+          LastEvaluatedKey: { subjectId: 'sub', pk: 'rt#1' },
+        };
+      }
+      return {};
+    });
+
+    const store = new DynamodbRefreshTokenProvider({ tableName: 'tbl' });
+    await expect(store.revokeSubject({
+      subjectId: 'sub',
+      now: fixedNow,
+      abortSignal: controller.signal,
+    })).rejects.toBeInstanceOf(DynamodbRefreshTokenProviderAbortError);
+
+    const queries = mockSend.mock.calls.filter((call) => call[0] instanceof QueryCommand);
+    expect(queries).toHaveLength(1);
+    const updates = mockSend.mock.calls.filter((call) => call[0] instanceof UpdateCommand);
+    expect(updates).toHaveLength(1);
+    expect((updates[0][0] as UpdateCommand).input.Key).toEqual({ pk: 'sub#sub' });
   });
 });

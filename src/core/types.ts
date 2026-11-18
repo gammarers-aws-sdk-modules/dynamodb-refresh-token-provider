@@ -144,6 +144,12 @@ export type IssueParams = {
   sessionId: string;
   /** Clock override for tests; defaults to `new Date()`. */
   now?: Date;
+  /**
+   * Cancels this issue, including every DynamoDB request it has not sent yet.
+   * When the signal is already aborted, or a request fails after it aborts, the call throws
+   * {@link DynamodbRefreshTokenProviderAbortError}.
+   */
+  abortSignal?: AbortSignal;
 };
 
 /** Result of {@link RefreshTokenStore.issue}. */
@@ -160,6 +166,12 @@ export type RotateParams = {
   refreshToken: string;
   /** Clock override for tests; defaults to `new Date()`. */
   now?: Date;
+  /**
+   * Cancels this rotate, including the reuse cascade into {@link RefreshTokenStore.revokeSession}.
+   * When the signal is already aborted, or a request fails after it aborts, the call throws
+   * {@link DynamodbRefreshTokenProviderAbortError}.
+   */
+  abortSignal?: AbortSignal;
 };
 
 /** Result of {@link RefreshTokenStore.rotate}. */
@@ -180,6 +192,12 @@ export type RevokeParams = {
   refreshToken: string;
   /** Clock override for tests; defaults to `new Date()`. */
   now?: Date;
+  /**
+   * Cancels this revoke, including the token-row update when it has not been sent yet.
+   * When the signal is already aborted, or the update fails after it aborts, the call throws
+   * {@link DynamodbRefreshTokenProviderAbortError}.
+   */
+  abortSignal?: AbortSignal;
 };
 
 /** Parameters for {@link RefreshTokenStore.revokeSession}. */
@@ -195,6 +213,12 @@ export type RevokeSessionParams = {
   subjectId?: string;
   /** Clock override for tests; defaults to `new Date()`. */
   now?: Date;
+  /**
+   * Cancels this session revoke, including marker and token updates that have not been sent yet.
+   * Writes that already succeeded stay. The call throws {@link DynamodbRefreshTokenProviderAbortError}
+   * and does not return `revokedCount`.
+   */
+  abortSignal?: AbortSignal;
 };
 
 /** Result of {@link RefreshTokenStore.revokeSession}. */
@@ -212,6 +236,12 @@ export type RevokeSubjectParams = {
   subjectId: string;
   /** Clock override for tests; defaults to `new Date()`. */
   now?: Date;
+  /**
+   * Cancels this subject revoke, including the generation update and token updates that have not been sent yet.
+   * Writes that already succeeded stay. The call throws {@link DynamodbRefreshTokenProviderAbortError}
+   * and does not return `revokedCount`.
+   */
+  abortSignal?: AbortSignal;
 };
 
 /** Result of {@link RefreshTokenStore.revokeSubject}. */
@@ -272,10 +302,11 @@ export interface RefreshTokenStore {
    * (`sess#<sessionId>#<subjectId>`) has `revokedAt` set. The new row stores the current
    * subject generation from `sub#<subjectId>` (0 when that marker is absent).
    *
-   * @param params - Subject, session, and optional clock.
+   * @param params - Subject, session, optional clock, and optional `abortSignal`.
    * @returns Plaintext token and expiration as Unix seconds.
    * @throws {@link DynamodbRefreshTokenProviderRevokedError} When the session or the session-subject pair is revoked.
    * @throws {@link DynamodbRefreshTokenProviderInvalidError} When a revocation marker has an unexpected attribute type.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `params.abortSignal` is aborted.
    */
   issue(params: IssueParams): Promise<IssueResult>;
 
@@ -285,7 +316,7 @@ export interface RefreshTokenStore {
    * When reuse is detected and {@link StoreOptions.revokeSessionOnReuse} is enabled, the
    * implementation may revoke the whole session before throwing.
    *
-   * @param params - Current token and optional clock.
+   * @param params - Current token, optional clock, and optional `abortSignal`.
    * @returns Subject, session, new token, and new expiration.
    * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token is invalid, no row exists, or the
    *   stored row is malformed.
@@ -295,6 +326,7 @@ export interface RefreshTokenStore {
    *   token's condition failed during rotation. May include `subjectId` / `sessionId` from the store row.
    * @throws {@link DynamodbRefreshTokenProviderRotateError} When rotation failed for a reason other than
    *   reuse (e.g. throttling or a transaction conflict). The token is not consumed and may be retried.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `params.abortSignal` is aborted.
    */
   rotate(params: RotateParams): Promise<RotateResult>;
 
@@ -303,9 +335,10 @@ export interface RefreshTokenStore {
    *
    * Does not change DynamoDB TTL (`ttl`); cleanup still follows the value from issue/rotate.
    *
-   * @param params - Token to revoke and optional clock.
+   * @param params - Token to revoke, optional clock, and optional `abortSignal`.
    * @returns `true` after a successful update or no-op when the item is absent.
    * @throws {@link DynamodbRefreshTokenProviderInvalidError} When the token string format is invalid.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `params.abortSignal` is aborted.
    */
   revoke(params: RevokeParams): Promise<true>;
 
@@ -320,8 +353,10 @@ export interface RefreshTokenStore {
    * Requires a DynamoDB GSI whose partition key is `sessionId` (see {@link StoreOptions.sessionIdIndexName}).
    * Optional `subjectId` is enforced on each base-table token update condition.
    *
-   * @param params - Session id, optional subject filter, and optional clock.
+   * @param params - Session id, optional subject filter, optional clock, and optional `abortSignal`.
    * @returns Count of token rows updated with `revokedAt`.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `params.abortSignal` is aborted.
+   *   Marker and token writes that already succeeded stay, and `revokedCount` is not returned.
    */
   revokeSession(params: RevokeSessionParams): Promise<RevokeSessionResult>;
 
@@ -336,8 +371,10 @@ export interface RefreshTokenStore {
    *
    * Requires a DynamoDB GSI whose partition key is `subjectId` (see {@link StoreOptions.subjectIdIndexName}).
    *
-   * @param params - Subject id and optional clock.
+   * @param params - Subject id, optional clock, and optional `abortSignal`.
    * @returns Count of token rows updated with `revokedAt`.
+   * @throws {@link DynamodbRefreshTokenProviderAbortError} When `params.abortSignal` is aborted.
+   *   The generation update and token writes that already succeeded stay, and `revokedCount` is not returned.
    */
   revokeSubject(params: RevokeSubjectParams): Promise<RevokeSubjectResult>;
 }

@@ -38,6 +38,7 @@ export { DynamodbRefreshTokenProvider } from './dynamodb-refresh-token-provider'
  * {@link DynamodbRefreshTokenProviderRotateError} marks a non-reuse rotate failure that may be retried.
  */
 export type {
+  DynamodbRefreshTokenProviderAbortErrorOptions,
   DynamodbRefreshTokenProviderReusedErrorContext,
   DynamodbRefreshTokenProviderRotateErrorOptions,
 } from './core/errors';
@@ -48,6 +49,7 @@ export {
   DynamodbRefreshTokenProviderInvalidError,
   DynamodbRefreshTokenProviderReusedError,
   DynamodbRefreshTokenProviderRevokedError,
+  DynamodbRefreshTokenProviderAbortError,
   DynamodbRefreshTokenProviderRotateError,
 } from './core/errors';
 
