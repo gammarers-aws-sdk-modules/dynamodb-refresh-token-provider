@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 
 import { randomToken, sha256Hex } from '../src';
-import { base64UrlLength } from '../src/core/hash';
+import { DEFAULT_RANDOM_TOKEN_BYTES, base64UrlLength } from '../src/core/hash';
 
 describe('base64UrlLength', () => {
   it.each([
@@ -30,7 +30,7 @@ describe('randomToken', () => {
   it('should return base64url string of expected length for default byte count', () => {
     const token = randomToken();
     expect(token).toMatch(/^[A-Za-z0-9_-]+$/);
-    expect(token.length).toBe(Math.ceil((32 * 8) / 6));
+    expect(token.length).toBe(base64UrlLength(DEFAULT_RANDOM_TOKEN_BYTES));
   });
 
   it('should use cryptographically secure random bytes', () => {
