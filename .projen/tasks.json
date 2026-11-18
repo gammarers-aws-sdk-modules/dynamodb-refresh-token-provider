@@ -344,7 +344,8 @@
             "ts-node",
             "typescript",
             "@aws-sdk/client-dynamodb",
-            "@aws-sdk/lib-dynamodb"
+            "@aws-sdk/lib-dynamodb",
+            "@smithy/node-http-handler"
           ]
         },
         {

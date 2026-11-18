@@ -1,4 +1,5 @@
 import {
+  DynamodbRefreshTokenProviderAbortError,
   DynamodbRefreshTokenProviderError,
   DynamodbRefreshTokenProviderExpiredError,
   DynamodbRefreshTokenProviderInvalidError,
@@ -35,6 +36,11 @@ describe('refresh token errors', () => {
       DynamodbRefreshTokenProviderRotateError,
       'The refresh token could not be rotated. Please try signing in again.',
     ],
+    [
+      'DynamodbRefreshTokenProviderAbortError',
+      DynamodbRefreshTokenProviderAbortError,
+      'The operation was aborted.',
+    ],
   ] as const)('should have default message for %s', (_label, Ctor, expected) => {
     const err = new Ctor();
     expect(err).toBeInstanceOf(DynamodbRefreshTokenProviderError);
@@ -58,6 +64,13 @@ describe('refresh token errors', () => {
     expect(err.message).toBe(
       'This refresh token has already been rotated and cannot be used again.',
     );
+  });
+
+  it('should attach cause on DynamodbRefreshTokenProviderAbortError', () => {
+    const cause = new Error('aborted');
+    const err = new DynamodbRefreshTokenProviderAbortError(undefined, { cause });
+    expect(err.cause).toBe(cause);
+    expect(err.message).toBe('The operation was aborted.');
   });
 
   it('should attach cause on DynamodbRefreshTokenProviderRotateError', () => {
