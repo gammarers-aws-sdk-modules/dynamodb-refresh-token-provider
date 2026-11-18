@@ -6,6 +6,7 @@ import {
   TransactWriteCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 
 import {
   DynamodbRefreshTokenProvider,
@@ -48,6 +49,25 @@ const fixedNow = new Date('2020-01-01T00:00:00Z');
 const nowSec = Math.floor(fixedNow.getTime() / 1000);
 const defaultTtlSec = 60 * 24 * 60 * 60;
 const futureExpiresAt = nowSec + defaultTtlSec + 1;
+
+/**
+ * Asserts the internal client's default Node.js request handler timeouts.
+ *
+ * `httpHandlerConfigs()` stays empty until the first request. The constructor stores the
+ * options on `configProvider`, which is the value this test reads.
+ *
+ * @param config - Config passed to the mocked `DynamoDBClient` constructor.
+ */
+const expectDefaultRequestHandler = async (config: DynamoDBClientConfig): Promise<void> => {
+  expect(config.requestHandler).toBeInstanceOf(NodeHttpHandler);
+  const handler = config.requestHandler as NodeHttpHandler;
+  // configProvider is not on the public type. It is the constructor promise that holds the timeouts.
+  const resolved = await (handler as unknown as {
+    configProvider: Promise<{ connectionTimeout?: number; requestTimeout?: number }>;
+  }).configProvider;
+  expect(resolved.connectionTimeout).toBe(5_000);
+  expect(resolved.requestTimeout).toBe(30_000);
+};
 
 beforeEach(() => {
   mockSend.mockReset();
@@ -805,9 +825,10 @@ describe('options', () => {
     });
     await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
 
-    expect(mockDynamoDBClient).toHaveBeenCalledWith({
-      endpoint: 'http://localhost:8000',
-    });
+    const config = mockDynamoDBClient.mock.calls[0][0] as DynamoDBClientConfig;
+    expect(config.endpoint).toBe('http://localhost:8000');
+    expect(config.region).toBeUndefined();
+    await expectDefaultRequestHandler(config);
     expect(DynamoDBDocumentClient.from).toHaveBeenCalled();
     expect(mockSend).toHaveBeenCalledTimes(4);
   });
@@ -821,6 +842,8 @@ describe('options', () => {
     const config = mockDynamoDBClient.mock.calls[0][0] as DynamoDBClientConfig;
     expect(config.region).toBeUndefined();
     expect(config.endpoint).toBeUndefined();
+    expect(config.maxAttempts).toBeUndefined();
+    await expectDefaultRequestHandler(config);
   });
 
   it('should pass the region option to DynamoDBClient', async () => {
@@ -832,6 +855,7 @@ describe('options', () => {
     const config = mockDynamoDBClient.mock.calls[0][0] as DynamoDBClientConfig;
     expect(config.region).toBe('ap-northeast-1');
     expect(config.endpoint).toBeUndefined();
+    await expectDefaultRequestHandler(config);
   });
 
   it('should accept the positional constructor form for compatibility', async () => {
@@ -846,6 +870,7 @@ describe('options', () => {
     expect(put?.Item).toMatchObject({ expiresAt: nowSec + 7 * 24 * 60 * 60 });
     const config = mockDynamoDBClient.mock.calls[0][0] as DynamoDBClientConfig;
     expect(config.region).toBe('eu-west-1');
+    await expectDefaultRequestHandler(config);
   });
 
   it('should reuse the document client across calls', async () => {
@@ -892,12 +917,14 @@ describe('options', () => {
     });
     await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
 
-    expect(mockDynamoDBClient).toHaveBeenCalledWith({
+    const config = mockDynamoDBClient.mock.calls[0][0] as DynamoDBClientConfig;
+    expect(config).toMatchObject({
       region: 'eu-west-1',
       endpoint: 'http://localhost:8000',
       credentials,
       maxAttempts: 5,
     });
+    await expectDefaultRequestHandler(config);
     expect(DynamoDBDocumentClient.from).toHaveBeenCalledTimes(1);
   });
 
@@ -913,9 +940,26 @@ describe('options', () => {
     });
     await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
 
-    expect(mockDynamoDBClient).toHaveBeenCalledWith({
-      endpoint: 'http://localhost:4566',
+    const config = mockDynamoDBClient.mock.calls[0][0] as DynamoDBClientConfig;
+    expect(config.endpoint).toBe('http://localhost:4566');
+    await expectDefaultRequestHandler(config);
+  });
+
+  it('should let clientConfig.requestHandler replace the default request handler', async () => {
+    mockSend.mockResolvedValue({});
+
+    const requestHandler = new NodeHttpHandler({
+      connectionTimeout: 1_000,
+      requestTimeout: 2_000,
     });
+    const store = new DynamodbRefreshTokenProvider({
+      tableName: 'tbl',
+      clientConfig: { requestHandler },
+    });
+    await store.issue({ subjectId: 'a', sessionId: 'b', now: fixedNow });
+
+    const config = mockDynamoDBClient.mock.calls[0][0] as DynamoDBClientConfig;
+    expect(config.requestHandler).toBe(requestHandler);
   });
 
   it('should throw DynamodbRefreshTokenProviderValidateError when documentClient and clientConfig are both set', () => {

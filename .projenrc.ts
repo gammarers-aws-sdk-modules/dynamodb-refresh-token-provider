@@ -6,6 +6,7 @@ const project = new ProjenTypeScriptProject({
   deps: [
     '@aws-sdk/client-dynamodb@^3.777.0',
     '@aws-sdk/lib-dynamodb@^3.777.0',
+    '@smithy/node-http-handler@^4.14.2',
   ],
   devDeps: [
     '@gammarers/projen-projects@^0.6.2',

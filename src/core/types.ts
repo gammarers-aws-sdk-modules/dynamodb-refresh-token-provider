@@ -87,7 +87,9 @@ export type StoreOptions = {
 
   /**
    * Config for the internally constructed `DynamoDBClient` (credentials, retries, request handler, and so on).
-   * `region` and {@link StoreOptions.endpoint} are the base; fields on this object override them.
+   * `region`, {@link StoreOptions.endpoint}, and the default `NodeHttpHandler` (connection timeout
+   * 5 seconds, request timeout 30 seconds) are the base; fields on this object override them.
+   * `requestHandler` here replaces that default handler.
    * Mutually exclusive with {@link StoreOptions.documentClient}.
    */
   clientConfig?: DynamoDBClientConfig;

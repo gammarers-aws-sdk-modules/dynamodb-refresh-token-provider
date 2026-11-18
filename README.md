@@ -129,7 +129,7 @@ await store.revokeSubject({ subjectId: 'user-123' });
 
 ### DynamoDB client
 
-By default the provider builds a `DynamoDBClient` from the optional `region` and `endpoint` options, then wraps it with `DynamoDBDocumentClient.from`. When they are omitted, the AWS SDK resolves the region and the matching endpoint (including FIPS, dual-stack, and China partitions). Pass `documentClient` to reuse an existing document client, including one created from an X-Ray-wrapped client; `region` and `endpoint` are not applied in that case. Pass `clientConfig` to supply credentials, retries, or a request handler to the client this provider constructs. Do not set `documentClient` and `clientConfig` together.
+By default the provider builds a `DynamoDBClient` from the optional `region` and `endpoint` options, then wraps it with `DynamoDBDocumentClient.from`. When they are omitted, the AWS SDK resolves the region and the matching endpoint (including FIPS, dual-stack, and China partitions). That client uses a Node.js request handler with a **5 second connection timeout** and a **30 second request timeout**. Retries stay at the AWS SDK default (`maxAttempts` 3, standard retry mode) unless `clientConfig` sets them. `clientConfig.requestHandler` replaces the default handler. Pass `documentClient` to reuse an existing document client, including one created from an X-Ray-wrapped client; `region`, `endpoint`, and these timeouts are not applied in that case. Pass `clientConfig` to supply credentials, retries, or a request handler to the client this provider constructs. Do not set `documentClient` and `clientConfig` together.
 
 ```typescript
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -249,7 +249,7 @@ Invalid `tokenBytes`, `ttlSeconds`, or `ttlDays`, or setting both `documentClien
 | `consistentRead` | `boolean` | `true` | Use strongly consistent reads on every `GetItem`, including token rows and revocation marker rows (`sess#…`, `sub#…`). Transaction `ConditionCheck`s stay strongly consistent when this is `false`. |
 | `endpoint` | `string` | (resolved by the AWS SDK) | Custom DynamoDB API endpoint (e.g. LocalStack or DynamoDB Local). Ignored when `documentClient` is set. Overridden by `clientConfig.endpoint` when both are set. |
 | `documentClient` | `DynamoDBDocumentClient` | (none) | Existing document client. When set, the provider does not construct a client. `clientConfig`, `region`, `endpoint`, and `translateConfig` are not applied. Mutually exclusive with `clientConfig`. |
-| `clientConfig` | `DynamoDBClientConfig` | (none) | Passed to `new DynamoDBClient` after `region` and `endpoint`. Fields here override those. Mutually exclusive with `documentClient`. |
+| `clientConfig` | `DynamoDBClientConfig` | (none) | Passed to `new DynamoDBClient` after `region`, `endpoint`, and the default request handler (connection timeout 5 seconds, request timeout 30 seconds). Fields here override those. `requestHandler` replaces that default handler. Mutually exclusive with `documentClient`. |
 | `sessionIdIndexName` | `string` | `'sessionId-index'` | GSI name whose partition key is `sessionId` (required for `revokeSession`). |
 | `subjectIdIndexName` | `string` | `'subjectId-index'` | GSI name whose partition key is `subjectId` (required for `revokeSubject`). |
 | `revokeSessionOnReuse` | `boolean` | `false` | When true, `rotate` calls `revokeSession` for the token’s session before throwing `DynamodbRefreshTokenProviderReusedError`. |

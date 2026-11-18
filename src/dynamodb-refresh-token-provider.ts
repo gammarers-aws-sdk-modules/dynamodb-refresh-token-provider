@@ -7,6 +7,7 @@ import {
   UpdateCommand,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 
 import {
   DynamodbRefreshTokenProviderExpiredError,
@@ -60,6 +61,12 @@ const DEFAULT_SUBJECT_ID_INDEX_NAME = 'subjectId-index';
 
 /** Default token lifetime in days when neither ttlSeconds nor ttlDays is set. */
 const DEFAULT_TTL_DAYS = 60;
+
+/** TCP connection timeout for the internally constructed DynamoDB client. */
+const DYNAMODB_CONNECTION_TIMEOUT_MS = 5_000;
+
+/** Per-request timeout for the internally constructed DynamoDB client. */
+const DYNAMODB_REQUEST_TIMEOUT_MS = 30_000;
 
 /** Condition that the token row exists. */
 const ITEM_EXISTS_CONDITION = 'attribute_exists(pk)';
@@ -631,9 +638,11 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
   /**
    * Builds the config for an internally constructed `DynamoDBClient`.
    *
-   * Starts from {@link DynamodbRefreshTokenProviderOptions.region} and {@link StoreOptions.endpoint};
-   * omitted values stay `undefined` so the AWS SDK resolves them. {@link StoreOptions.clientConfig}
-   * is applied last so its fields win.
+   * Starts from {@link DynamodbRefreshTokenProviderOptions.region}, {@link StoreOptions.endpoint},
+   * and a `NodeHttpHandler` with a 5 second connection timeout and a 30 second request timeout.
+   * Omitted region and endpoint stay `undefined` so the AWS SDK resolves them. Retry count and
+   * retry mode stay at the SDK defaults. {@link StoreOptions.clientConfig} is applied last so its
+   * fields win, including a caller-supplied `requestHandler`.
    *
    * @returns Config passed to `new DynamoDBClient`.
    */
@@ -641,6 +650,10 @@ export class DynamodbRefreshTokenProvider implements RefreshTokenStore {
     return {
       region: this.options.region,
       endpoint: this.options.endpoint,
+      requestHandler: new NodeHttpHandler({
+        connectionTimeout: DYNAMODB_CONNECTION_TIMEOUT_MS,
+        requestTimeout: DYNAMODB_REQUEST_TIMEOUT_MS,
+      }),
       ...this.options.clientConfig,
     };
   };
