@@ -17,6 +17,8 @@ TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** 
 - **Session revocation (OAuth 2.0 BCP)** — `revokeSession({ sessionId })` writes `revokedAt` on `sess#<sessionId>` (or `sess#<sessionId>#<subjectId>` when `subjectId` is set) and stamps token rows returned by the `sessionId` GSI. `issue` rejects a revoked session. Optional `revokeSessionOnReuse` cascades on reuse detection.
 - **Subject revocation** — `revokeSubject({ subjectId })` increments `generation` on `sub#<subjectId>` and stamps token rows returned by the `subjectId` GSI (logout all devices, password change, account suspension). A later `issue` stores the new generation and succeeds. Older tokens cannot be rotated.
 - **Structured errors** — `DynamodbRefreshTokenProviderValidateError` (invalid constructor options), `DynamodbRefreshTokenProviderInvalidError`, `DynamodbRefreshTokenProviderExpiredError`, `DynamodbRefreshTokenProviderRevokedError` (token, session, or subject generation), `DynamodbRefreshTokenProviderReusedError` (with optional `subjectId` / `sessionId`), and `DynamodbRefreshTokenProviderRotateError` (non-reuse rotate failure such as throttling or a transaction conflict; the token is not consumed and may be retried). All extend `DynamodbRefreshTokenProviderError`. Check a subclass before the base.
+- **Utilities** — `sha256Hex` and `randomToken` for hashing and token generation aligned with the store.
+- **Injectable DynamoDB client** — pass an existing `DynamoDBDocumentClient`, or a `DynamoDBClientConfig` for credentials, retries, and request handlers.
 
 ## How it works
 
@@ -29,8 +31,6 @@ TypeScript library that stores **opaque refresh tokens** in **Amazon DynamoDB** 
 Marker items do not set `sessionId` or `subjectId`, so the GSIs do not return them. They have no `ttl`: a rotated token chain can outlive the configured lifetime, and removing a session marker would let a missed token rotate again. Partition-key prefixes `sess#` and `sub#` are reserved. Do not use them as `pkPrefix`.
 
 Concurrent `rotate` calls for the same subject condition-check one subject marker and can cancel with a transaction conflict. That failure is `DynamodbRefreshTokenProviderRotateError`. The presented token is not consumed.
-- **Utilities** — `sha256Hex` and `randomToken` for hashing and token generation aligned with the store.
-- **Injectable DynamoDB client** — pass an existing `DynamoDBDocumentClient`, or a `DynamoDBClientConfig` for credentials, retries, and request handlers.
 
 ## Installation
 
